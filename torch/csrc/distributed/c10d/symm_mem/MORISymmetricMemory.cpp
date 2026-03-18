@@ -1,18 +1,21 @@
 // Mori shmem backend for SymmetricMemory on AMD GPUs.
 //
 // Implements SymmetricMemoryAllocator and SymmetricMemory using Mori's
-// host-side C++ API (shmem_api.hpp). No direct HIP/CUDA includes needed —
-// all GPU operations are encapsulated inside libmori_shmem.so.
+// host-side C++ API (shmem_api.hpp). HIP runtime is used for device-side
+// pointer array management (get_buffer_ptrs_dev / get_signal_pad_ptrs_dev).
 //
 // Auto-loaded via torch_hip -> torch_mori dependency chain.
 // Set TORCH_SYMMMEM=MORI or call set_backend("MORI") to activate.
 
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
+#include <torch/csrc/distributed/c10d/symm_mem/CUDASymmetricMemoryUtils.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
+#include <c10/hip/HIPCachingAllocator.h>
 #include <c10/util/env.h>
 
 #include <mori/shmem/shmem_api.hpp>
 
+#include <hip/hip_runtime_api.h>
 #include <mutex>
 
 namespace c10d {
@@ -22,6 +25,13 @@ static std::string getMoriBackendEnv() {
   static auto val = c10::utils::get_env("TORCH_SYMMMEM");
   return val.has_value() ? val.value() : "";
 }
+
+static StoreExchange storeExchange("MORISymmetricMemory");
+
+// group-local rank → global rank (== mori PE) mapping, cached per group_name
+static std::mutex rank_map_mutex;
+static std::unordered_map<std::string, std::vector<int>>
+    rank_to_global_rank_map{};
 
 struct MORIAllocation {
   void* ptr;
@@ -51,13 +61,30 @@ class MORIPeerAllocInfo : public c10::intrusive_ptr_target {
     auto group = resolve_process_group(group_name);
     rank_ = group->getRank();
     world_size_ = group->getSize();
+    auto store = group->getStore();
 
     int my_pe = mori::shmem::ShmemMyPe();
+
+    // Exchange rank-to-global-rank mapping for this group (cached per group).
+    // For the WORLD group, global_rank == local rank == mori PE.
+    // For subgroups, this maps local ranks to the correct mori PEs.
+    std::lock_guard<std::mutex> rank_map_lock(rank_map_mutex);
+    auto it = rank_to_global_rank_map.find(group_name);
+    if (it == rank_to_global_rank_map.end()) {
+      auto global_group = resolve_process_group("0");
+      auto global_rank = global_group->getRank();
+      auto rank_to_global_rank =
+          storeExchange.all_gather(store, rank_, world_size_, global_rank);
+      it = rank_to_global_rank_map.emplace_hint(
+          it, group_name, rank_to_global_rank);
+    }
+    auto& rank_to_global_rank = it->second;
 
     world_within_p2p_ = true;
     for (int r = 0; r < world_size_; ++r) {
       uint64_t peer_ptr = mori::shmem::ShmemPtrP2p(
-          reinterpret_cast<uint64_t>(base_ptr_), my_pe, r);
+          reinterpret_cast<uint64_t>(base_ptr_), my_pe,
+          rank_to_global_rank[r]);
       if (peer_ptr != 0) {
         buffers_.push_back(reinterpret_cast<void*>(peer_ptr));
       } else {
@@ -66,16 +93,33 @@ class MORIPeerAllocInfo : public c10::intrusive_ptr_target {
       }
     }
 
-    // Signal pads allocated via mori symmetric heap
+    // Signal pads allocated via mori symmetric heap.
     const size_t signal_pad_size = get_signal_pad_size();
     signal_pad_ptr_ = mori::shmem::ShmemMalloc(signal_pad_size);
     TORCH_CHECK(signal_pad_ptr_ != nullptr, "mori ShmemMalloc failed for signal pad");
+    C10_HIP_CHECK(hipMemset(signal_pad_ptr_, 0, signal_pad_size));
 
     for (int r = 0; r < world_size_; ++r) {
       uint64_t peer_sig = mori::shmem::ShmemPtrP2p(
-          reinterpret_cast<uint64_t>(signal_pad_ptr_), my_pe, r);
+          reinterpret_cast<uint64_t>(signal_pad_ptr_), my_pe,
+          rank_to_global_rank[r]);
       signal_pads_.push_back(reinterpret_cast<void*>(peer_sig));
     }
+
+    // Copy pointer arrays to device memory so GPU kernels can index them
+    const size_t arr_size = sizeof(void*) * world_size_;
+    buffers_dev_ = reinterpret_cast<void**>(
+        c10::cuda::CUDACachingAllocator::raw_alloc(arr_size));
+    signal_pads_dev_ = reinterpret_cast<void**>(
+        c10::cuda::CUDACachingAllocator::raw_alloc(arr_size));
+
+    C10_HIP_CHECK(hipMemcpy(
+        buffers_dev_, buffers_.data(), arr_size, hipMemcpyHostToDevice));
+    C10_HIP_CHECK(hipMemcpy(
+        signal_pads_dev_,
+        signal_pads_.data(),
+        arr_size,
+        hipMemcpyHostToDevice));
   }
 
  private:
@@ -86,6 +130,8 @@ class MORIPeerAllocInfo : public c10::intrusive_ptr_target {
   int world_size_;
   std::vector<void*> buffers_;
   std::vector<void*> signal_pads_;
+  void** buffers_dev_{nullptr};
+  void** signal_pads_dev_{nullptr};
   bool world_within_p2p_;
 
   friend class MORISymmetricMemory;
@@ -121,16 +167,11 @@ class MORISymmetricMemory : public SymmetricMemory {
   }
 
   void** get_buffer_ptrs_dev() override {
-    // Device pointer arrays not yet implemented for MORI backend.
-    // The Python-level fused ops use get_buffer() which goes through
-    // host-side P2P pointers, so this is not needed for basic functionality.
-    TORCH_CHECK(false, "MORISymmetricMemory::get_buffer_ptrs_dev not yet implemented");
-    return nullptr;
+    return pai_->buffers_dev_;
   }
 
   void** get_signal_pad_ptrs_dev() override {
-    TORCH_CHECK(false, "MORISymmetricMemory::get_signal_pad_ptrs_dev not yet implemented");
-    return nullptr;
+    return pai_->signal_pads_dev_;
   }
 
   size_t get_buffer_size() override {
@@ -171,6 +212,15 @@ class MORISymmetricMemory : public SymmetricMemory {
 
   c10::Device get_device() override {
     return c10::Device(c10::DeviceType::CUDA, device_idx_);
+  }
+
+  const std::vector<int>& get_rank_to_global_rank() override {
+    std::lock_guard<std::mutex> lock(rank_map_mutex);
+    auto it = rank_to_global_rank_map.find(group_name_);
+    TORCH_CHECK(
+        it != rank_to_global_rank_map.end(),
+        "Group name not found in rank_to_global_rank_map");
+    return it->second;
   }
 
   bool world_within_direct_access() override {
@@ -291,9 +341,12 @@ class MORISymmetricMemoryAllocator : public SymmetricMemoryAllocator {
           return ptr_int >= base_ptr &&
               ptr_int < base_ptr + allocation->buffer_size;
         });
-    TORCH_CHECK(
-        alloc_it != allocations_.end(),
-        "Pointer not within any SymmetricMemory allocation");
+    if (alloc_it == allocations_.end()) {
+      TORCH_WARN(
+          "Pointer not within any SymmetricMemory allocation, "
+          "is the tensor allocated from SymmetricMemory?");
+      return nullptr;
+    }
 
     auto& allocation = alloc_it->second;
 
@@ -341,10 +394,9 @@ class MORISymmetricMemoryAllocator : public SymmetricMemoryAllocator {
 struct RegisterMORISymmetricMemoryAllocator {
   RegisterMORISymmetricMemoryAllocator() {
     auto allocator = c10::make_intrusive<MORISymmetricMemoryAllocator>();
+    register_availability("MORI", allocator);
     if (getMoriBackendEnv() == "MORI") {
       register_allocator(c10::DeviceType::CUDA, allocator);
-    } else {
-      register_availability("MORI", allocator);
     }
   }
 };
