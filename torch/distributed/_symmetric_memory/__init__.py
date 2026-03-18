@@ -2020,7 +2020,7 @@ def is_nvshmem_available() -> bool:
     return _is_nvshmem_available()
 
 
-def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL"]) -> None:
+def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL", "MORI"]) -> None:
     r"""
     Set the backend for symmetric memory allocation. This is a global setting
     and affects all subsequent calls to
@@ -2029,7 +2029,9 @@ def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL"]) -> None:
 
     Args:
         backend (str): the backend for symmetric memory allocation. Currently,
-            only `"NVSHMEM"`, `"CUDA"`, `"NCCL"` are supported.
+            `"CUDA"`, `"NVSHMEM"`, `"NCCL"`, and `"MORI"` are supported.
+            `"MORI"` uses mori shmem for symmetric memory on AMD GPUs,
+            supporting both intra-node P2P and inter-node RDMA (IBGDA).
     """
     _SymmetricMemory.set_backend(name)
 

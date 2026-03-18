@@ -958,6 +958,56 @@ if(USE_ROCM)
     target_precompile_headers(torch_hip PRIVATE
         "$<$<COMPILE_LANGUAGE:CXX>:ATen/core/ATen_pch.h>")
   endif()
+
+  # Mori shmem backend for SymmetricMemory on AMD GPUs.
+  # Detect mori from: 1) pip package, 2) MORI_HOME env, 3) system paths.
+  # Set -DUSE_MORI=OFF to skip even if mori is installed.
+  if(NOT DEFINED USE_MORI)
+    set(USE_MORI ON)
+  endif()
+  if(USE_MORI)
+    # Lightweight detection: find the pip package directory without importing
+    # the full mori module (which may depend on torch being already built).
+    execute_process(
+      COMMAND ${Python_EXECUTABLE} -c
+        "import importlib.util; s=importlib.util.find_spec('mori'); print(s.submodule_search_locations[0] if s else '')"
+      OUTPUT_VARIABLE MORI_PY_DIR
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE MORI_PY_RESULT)
+    if(MORI_PY_RESULT EQUAL 0 AND MORI_PY_DIR)
+      message(STATUS "Mori package found at: ${MORI_PY_DIR}")
+    endif()
+
+    find_library(MORI_LIBRARY mori_shmem HINTS
+      ${MORI_PY_DIR} $ENV{MORI_HOME}/lib /usr/local/lib /opt/mori/lib
+      DOC "Location of libmori_shmem.so")
+    find_path(MORI_INCLUDE_DIR mori/shmem/shmem_api.hpp HINTS
+      ${MORI_PY_DIR}/_jit_sources/include $ENV{MORI_HOME}/include
+      /usr/local/include /opt/mori/include
+      DOC "Location of Mori shmem headers")
+  endif()
+
+  if(USE_MORI AND MORI_LIBRARY AND MORI_INCLUDE_DIR)
+    message(STATUS "Building with Mori shmem support:")
+    message(STATUS "  MORI_LIBRARY:    ${MORI_LIBRARY}")
+    message(STATUS "  MORI_INCLUDE_DIR: ${MORI_INCLUDE_DIR}")
+
+    add_library(torch_mori SHARED
+        "${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/MORISymmetricMemory.cpp")
+    target_include_directories(torch_mori PRIVATE ${MORI_INCLUDE_DIR})
+    target_compile_definitions(torch_mori PRIVATE __HIP_PLATFORM_AMD__ USE_MORI)
+    target_link_libraries(torch_mori PRIVATE torch_cpu hip::amdhip64 ${MORI_LIBRARY})
+    if(MPI_CXX_INCLUDE_DIRS)
+      target_include_directories(torch_mori PRIVATE ${MPI_CXX_INCLUDE_DIRS})
+    endif()
+    target_compile_definitions(torch_hip PUBLIC USE_MORI)
+    target_link_libraries(torch_hip PRIVATE torch_mori)
+    install(TARGETS torch_mori EXPORT Caffe2Targets DESTINATION "${TORCH_INSTALL_LIB_DIR}")
+  else()
+    message(STATUS "Mori not found or USE_MORI=OFF, not building with Mori support.")
+  endif()
+
 elseif(USE_CUDA)
   set(CUDA_LINK_LIBRARIES_KEYWORD PRIVATE)
   list(APPEND Caffe2_GPU_SRCS ${GENERATED_CXX_TORCH_CUDA})
