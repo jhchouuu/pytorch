@@ -2397,6 +2397,11 @@ def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL"]) -> None:
     :func:`torch.distributed._symmetric_memory.empty()`.  Note that the backend
     cannot be changed once a symmetric memory tensor has been allocated.
 
+    The initial backend can also be named with the ``TORCH_SYMMMEM``
+    environment variable. The name is checked at the first symmetric memory
+    use, so it may name a backend that another library registers after
+    ``import torch``.
+
     Args:
         name (str): the backend for symmetric memory allocation. Currently,
             only `"NVSHMEM"`, `"CUDA"`, `"NCCL"` are supported.

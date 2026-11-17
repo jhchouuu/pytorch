@@ -4005,6 +4005,51 @@ tensor = _SymmetricMemory.empty_strided_p2p((1024,), (1,), torch.float32, device
 instantiate_device_type_tests(SymmMemCleanupTest, globals(), only_for="cuda")
 
 
+@skipIf(not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch")
+class SymmMemBackendEnvTest(TestCase):
+    # TORCH_SYMMMEM is read when libtorch loads, so each case runs in a fresh
+    # interpreter.
+    def _run_script(self, script: str, symmmem: str):
+        env = {**os.environ, "TORCH_SYMMMEM": symmmem}
+        return subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    @requires_cuda
+    def test_unregistered_backend(self) -> None:
+        # A name no backend has registered (yet) must not abort `import torch`;
+        # it is checked at the first allocator lookup instead.
+        result = self._run_script(
+            """
+            import torch
+            import torch.distributed._symmetric_memory as symm_mem
+
+            assert symm_mem.get_backend("cuda") is None
+            assert not symm_mem.is_symm_mem_tensor(torch.empty(1, device="cuda"))
+            try:
+                symm_mem.empty(16, device="cuda:0")
+            except RuntimeError as e:
+                msg = str(e)
+                assert "TORCH_SYMMMEM is set to 'NOT_A_BACKEND'" in msg, msg
+                assert "CUDA" in msg, msg
+            else:
+                raise AssertionError("allocated with an unregistered backend")
+
+            # An explicit selection still works.
+            symm_mem.set_backend("CUDA")
+            t = symm_mem.empty(16, device="cuda:0")
+            assert symm_mem.is_symm_mem_tensor(t)
+            assert symm_mem.get_backend("cuda") == "CUDA"
+            """,
+            "NOT_A_BACKEND",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class SymmMemSingleProcTest(TestCase):
     @requires_accelerator
     # symm_mem::stream_write_value32_ is not implemented for XPU: https://github.com/intel/torch-xpu-ops/issues/5404

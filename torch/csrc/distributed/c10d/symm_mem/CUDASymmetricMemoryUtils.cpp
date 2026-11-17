@@ -157,13 +157,11 @@ void pg_barrier(
 // Query environment variable to get the backend used for CUDA Symmetric Memory.
 std::string getSymmMemBackendCUDA() {
   // TORCH_SYMMMEM environment variable can be used to indicate the preferred
-  // backend.
+  // backend. This runs while libtorch loads, so the name is not validated here:
+  // it may name a backend registered later by another library. An unknown name
+  // is reported at the first allocator lookup (see get_allocator).
   static auto val = c10::utils::get_env("TORCH_SYMMMEM");
   if (val.has_value()) {
-    TORCH_CHECK(
-        val.value() == "CUDA" || val.value() == "NVSHMEM" ||
-            val.value() == "NCCL",
-        "TORCH_SYMMMEM environment variable must be one of 'CUDA', 'NVSHMEM', 'NCCL'.")
     return val.value();
   }
   // If TORCH_SYMMMEM is not set, check if NVSHMEM is available (for broader
