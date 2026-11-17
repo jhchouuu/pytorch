@@ -779,6 +779,7 @@
   - '**flydsl**'
   - '**rccl**'
   - '**rocshmem**'
+  - '**mori**'
   - '**Rocprof**'
   - '**Rocblas**'
   - '**amdsmi**'
