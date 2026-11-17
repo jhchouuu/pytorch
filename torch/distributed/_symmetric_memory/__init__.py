@@ -2564,6 +2564,8 @@ def _lsa_put_signal(src: torch.Tensor, hdl: _SymmetricMemory, peer: int) -> None
 def _lsa_wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
     if peer < 0 or peer >= hdl.world_size:
         raise ValueError("wait_signal: invalid peer")
+    # The wait spins on the local pad, so check the peer the way its sender does.
+    _check_peer_access("wait_signal", hdl, peer)
     hdl.wait_signal(peer)
 
 
@@ -2672,7 +2674,8 @@ def wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
 
     Waits, on the current stream, for one signal that ``peer`` sent with
     :func:`put_signal` on ``hdl``. Backends other than NCCL wait with
-    ``hdl.wait_signal(peer)``.
+    ``hdl.wait_signal(peer)`` and, like :func:`put_signal`, require ``peer`` to
+    be reachable by load/store.
 
     Args:
         hdl (SymmetricMemory): the symmetric memory handle on which to wait for a signal.
