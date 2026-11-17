@@ -197,6 +197,10 @@ if [[ "$BUILD_ENVIRONMENT" == *rocm* ]]; then
     exit 1
   fi
 
+  # Compile torch._mori, the MORI symmetric memory backend, which reuses torch's
+  # signal-pad kernels; it needs only the vendored C ABI header to build.
+  export USE_MORI=1
+
   # hipify sources
   python tools/amd_build/build_amd.py
 fi
