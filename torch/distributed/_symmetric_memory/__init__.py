@@ -2643,8 +2643,12 @@ def put_signal(src: torch.Tensor, hdl: _SymmetricMemory, peer: int) -> None:
 
     The NCCL backend uses NCCL's one-sided API. Other backends store through
     the peer's mapping of the allocation and then call ``hdl.put_signal(peer)``,
-    which requires ``peer`` to be reachable by load/store and shares channel 0
-    of ``hdl``'s signal pad.
+    which requires ``peer`` to be reachable by load/store. That signal uses the
+    signal-pad slot that ``hdl.barrier()`` also uses, so ``peer`` must take it
+    with :func:`wait_signal` before it calls ``barrier()`` or another op that
+    synchronizes through the same allocation's signal pad, such as
+    :func:`reduce_scatter_offset`. Otherwise that barrier takes the signal as
+    this rank's arrival and returns early.
 
     Args:
         src (torch.Tensor): the source tensor to read data from.
@@ -2680,7 +2684,8 @@ def wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
     Waits, on the current stream, for one signal that ``peer`` sent with
     :func:`put_signal` on ``hdl``. Backends other than NCCL wait with
     ``hdl.wait_signal(peer)`` and, like :func:`put_signal`, require ``peer`` to
-    be reachable by load/store.
+    be reachable by load/store. On those backends, wait for every signal
+    before calling ``barrier()`` on the same allocation; see :func:`put_signal`.
 
     Args:
         hdl (SymmetricMemory): the symmetric memory handle on which to wait for a signal.
