@@ -1016,6 +1016,57 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         dist.barrier()
 
     @skipIfXpu(
+        msg="XPU symm mem gaps are tracked in https://github.com/intel/torch-xpu-ops/issues/5404"
+    )
+    @skipIf(
+        not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
+    )
+    @skip_if_lt_x_gpu(2)
+    def test_put_wait_signal(self) -> None:
+        self._init_process()
+        if symm_mem.get_backend(self.device) == "NCCL":
+            self.skipTest("covered by NCCLSymmetricMemoryTest.test_put_wait_signal")
+        group_name = dist.group.WORLD.group_name
+        next_peer = (self.rank + 1) % self.world_size
+        prev_peer = (self.rank - 1) % self.world_size
+
+        numel = 1024
+        src = torch.empty(numel, device=self.device)
+        dst = symm_mem.empty(numel, device=self.device).fill_(-1)
+        hdl = symm_mem.rendezvous(dst, group=group_name)
+        # Peers' fills land before this rank's first put.
+        hdl.barrier()
+
+        # Ring; several rounds check that each wait consumes exactly one signal.
+        for step in range(3):
+            src.fill_(self.rank * 10 + step)
+            symm_mem.put_signal(src, hdl, next_peer)
+            symm_mem.wait_signal(hdl, prev_peer)
+            self.assertEqual(dst, torch.full_like(dst, prev_peer * 10 + step))
+            # Everyone has read dst before the next round overwrites it.
+            hdl.barrier()
+
+        # A partial put only writes the head of the peer's tensor.
+        symm_mem.put_signal(src[:16].fill_(-2), hdl, next_peer)
+        symm_mem.wait_signal(hdl, prev_peer)
+        self.assertEqual(dst[:16], torch.full_like(dst[:16], -2))
+        self.assertEqual(dst[16:], torch.full_like(dst[16:], prev_peer * 10 + 2))
+        hdl.barrier()
+
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            symm_mem.put_signal(src[::2], hdl, next_peer)
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            symm_mem.put_signal(
+                torch.empty(hdl.buffer_size + 1, dtype=torch.uint8, device=self.device),
+                hdl,
+                next_peer,
+            )
+        with self.assertRaisesRegex(ValueError, "invalid peer"):
+            symm_mem.put_signal(src, hdl, self.world_size)
+        with self.assertRaisesRegex(ValueError, "invalid peer"):
+            symm_mem.wait_signal(hdl, -1)
+
+    @skipIfXpu(
         msg="XPU symm mem aborts (SIGABRT) instead of raising: https://github.com/intel/torch-xpu-ops/issues/5404"
     )
     @skipIf(
