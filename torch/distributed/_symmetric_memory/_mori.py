@@ -6,6 +6,7 @@ package. ``import torch`` loads neither: :func:`_load_backend` runs the first
 time ``set_backend("MORI")`` or ``TORCH_SYMMMEM=MORI`` names the backend.
 """
 
+import atexit
 import importlib.util
 import os
 import threading
@@ -83,4 +84,7 @@ def _load_backend() -> None:
             return
         ext = _import_extension()
         _load_library(ext)
+        ext.register_backend()
+        # Release MORI's allocations while HIP is still up.
+        atexit.register(ext.shutdown)
         _loaded = True

@@ -541,7 +541,12 @@ if(BUILD_PYTHON AND NOT BUILD_LIBTORCH_WHL)
     set(_mori_dir "${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/mori")
     Python_add_library(_mori MODULE WITH_SOABI
       "${_mori_dir}/MoriCco.cpp"
+      "${_mori_dir}/MoriSignalPad.hip"
+      "${_mori_dir}/MoriSymmetricMemory.cpp"
       "${_mori_dir}/mori_pybind.cpp")
+    # The signal-pad kernels are torch's own (CUDASymmetricMemory-inl.cuh).
+    set_source_files_properties("${_mori_dir}/MoriSignalPad.hip"
+      PROPERTIES LANGUAGE HIP)
     target_include_directories(_mori PRIVATE
       "${PROJECT_SOURCE_DIR}/third_party/mori/include")
     target_link_libraries(_mori PRIVATE
