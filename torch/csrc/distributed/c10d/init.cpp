@@ -1771,6 +1771,18 @@ instead.)")
       .def_static("set_backend", &::c10d::symmetric_memory::set_backend)
       .def_static("get_backend", &::c10d::symmetric_memory::get_backend)
       .def_static(
+          "_register_backend_loader",
+          [](const std::string& name, py::function loader) {
+            // Leaked on purpose: the registry outlives the interpreter.
+            auto* fn = new py::function(std::move(loader));
+            ::c10d::symmetric_memory::register_backend_loader(name, [fn] {
+              py::gil_scoped_acquire gil;
+              (*fn)();
+            });
+          },
+          py::arg("name"),
+          py::arg("loader"))
+      .def_static(
           "is_symm_mem_tensor",
           &::c10d::symmetric_memory::is_symm_mem_tensor,
           py::arg("tensor"))

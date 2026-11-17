@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <set>
 
@@ -64,7 +65,15 @@ class AllocatorMap {
     avail_map_[name] = std::move(allocator);
   }
 
+  void register_backend_loader(
+      const std::string& name,
+      std::function<void()> loader) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    loaders_[name] = std::move(loader);
+  }
+
   void set_backend(const std::string& name) {
+    maybe_load(name);
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = avail_map_.find(name);
     TORCH_CHECK(
@@ -85,6 +94,7 @@ class AllocatorMap {
   }
 
   std::optional<std::string> get_backend(c10::DeviceType device_type) {
+    maybe_load_requested(device_type);
     std::lock_guard<std::mutex> lock(mutex_);
     auto allocator = find_allocator(device_type);
     if (!allocator) {
@@ -96,6 +106,7 @@ class AllocatorMap {
 
   c10::intrusive_ptr<SymmetricMemoryAllocator> get_allocator(
       c10::DeviceType device_type) {
+    maybe_load_requested(device_type);
     std::lock_guard<std::mutex> lock(mutex_);
     auto allocator = find_allocator(device_type);
     if (!allocator) {
@@ -113,6 +124,7 @@ class AllocatorMap {
   }
 
   bool has_allocator(c10::DeviceType device_type) {
+    maybe_load_requested(device_type);
     std::lock_guard<std::mutex> lock(mutex_);
     if (find_allocator(device_type)) {
       return true;
@@ -127,6 +139,40 @@ class AllocatorMap {
 
  private:
   AllocatorMap() = default;
+
+  // Runs the loader of `name` if no backend of that name is registered yet.
+  // Runs without mutex_, since the loader registers the backend. A loader that
+  // throws or registers nothing runs again at the next lookup.
+  void maybe_load(const std::string& name) {
+    std::function<void()> loader;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (avail_map_.contains(name)) {
+        return;
+      }
+      auto it = loaders_.find(name);
+      if (it == loaders_.end()) {
+        return;
+      }
+      loader = it->second;
+    }
+    loader();
+  }
+
+  // Loads the backend TORCH_SYMMMEM names, if `device_type` has none set yet.
+  void maybe_load_requested(c10::DeviceType device_type) {
+    const auto& requested = requested_backend();
+    if (!requested.has_value()) {
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (map_.contains(device_type)) {
+        return;
+      }
+    }
+    maybe_load(*requested);
+  }
 
   // Requires mutex_. If no backend is set for `device_type`, selects the one
   // TORCH_SYMMMEM names once it is registered for that device type.
@@ -208,6 +254,9 @@ class AllocatorMap {
       std::string, // backend name "NVSHMEM", "CUDA", "NCCL", etc.
       c10::intrusive_ptr<SymmetricMemoryAllocator>>
       avail_map_;
+
+  // Backends that register themselves when first named, by name.
+  std::unordered_map<std::string, std::function<void()>> loaders_;
 
   bool in_use_ = false;
 };
@@ -296,6 +345,12 @@ void register_availability(
     const std::string& name,
     c10::intrusive_ptr<SymmetricMemoryAllocator> allocator) {
   AllocatorMap::get().register_availability(name, std::move(allocator));
+}
+
+void register_backend_loader(
+    const std::string& name,
+    std::function<void()> loader) {
+  AllocatorMap::get().register_backend_loader(name, std::move(loader));
 }
 
 void set_backend(const std::string& name) {

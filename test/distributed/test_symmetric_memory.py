@@ -4433,6 +4433,58 @@ class SymmMemBackendEnvTest(TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @requires_cuda
+    def test_backend_loader(self) -> None:
+        # A backend outside libtorch can be named before it is loaded: its
+        # loader runs at the first lookup, and again after a failure.
+        result = self._run_script(
+            """
+            import torch
+            import torch.distributed._symmetric_memory as symm_mem
+            from torch._C._distributed_c10d import _SymmetricMemory
+
+            calls = []
+
+            def failing_loader():
+                calls.append("failing")
+                raise ImportError("loader ran")
+
+            _SymmetricMemory._register_backend_loader("LAZY_BACKEND", failing_loader)
+            assert calls == [], calls
+            for _ in range(2):
+                try:
+                    symm_mem.get_backend("cuda")
+                except ImportError as e:
+                    assert "loader ran" in str(e), e
+                else:
+                    raise AssertionError("the loader did not run")
+            assert calls == ["failing", "failing"], calls
+
+            # set_backend() runs a loader too. One that registers nothing
+            # leaves the usual error.
+            _SymmetricMemory._register_backend_loader(
+                "NOOP_BACKEND", lambda: calls.append("noop")
+            )
+            try:
+                symm_mem.set_backend("NOOP_BACKEND")
+            except RuntimeError as e:
+                assert "does not find allocation backend" in str(e), e
+            else:
+                raise AssertionError("selected an unregistered backend")
+            assert calls[-1] == "noop", calls
+
+            # A registered backend never runs its loader.
+            _SymmetricMemory._register_backend_loader(
+                "CUDA", lambda: calls.append("cuda")
+            )
+            symm_mem.set_backend("CUDA")
+            assert symm_mem.get_backend("cuda") == "CUDA"
+            assert "cuda" not in calls, calls
+            """,
+            "LAZY_BACKEND",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 class SymmMemSingleProcTest(TestCase):
     @requires_accelerator
