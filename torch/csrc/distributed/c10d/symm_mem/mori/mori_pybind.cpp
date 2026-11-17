@@ -90,7 +90,8 @@ PYBIND11_MODULE(_mori, m) {
       },
       py::arg("hdl"),
       py::arg("lsa_barrier_count") = 1,
-      "The group's device communicator (mori::cco::ccoDevComm*), created on "
-      "first use per lsa_barrier_count; collective then. It knows the windows "
-      "imported before it was created.");
+      "A device communicator (mori::cco::ccoDevComm*) of the group, created "
+      "on first use per handle and lsa_barrier_count; collective then. It "
+      "knows this handle's windows and those of earlier rendezvous with the "
+      "group, while they live.");
 }

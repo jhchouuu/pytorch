@@ -312,8 +312,6 @@ struct CommGroup {
   uint64_t epoch = 0;
   std::vector<int> rank_to_global_rank;
   int* rank_to_global_rank_dev = nullptr;
-  std::mutex mutex; // guards dev_comms
-  std::map<int, void*> dev_comms; // by lsa_barrier_count
 
   CommGroup() = default;
   CommGroup(const CommGroup&) = delete;
@@ -332,11 +330,7 @@ struct CommGroup {
     if (rank_to_global_rank_dev) {
       (void)hipFree(rank_to_global_rank_dev);
     }
-    const auto& api = mori_cco();
-    for (auto& [count, dev_comm] : dev_comms) {
-      (void)api.devCommDestroy(comm, dev_comm);
-    }
-    (void)api.commDestroy(comm);
+    (void)mori_cco().commDestroy(comm);
   }
 };
 
@@ -373,8 +367,8 @@ struct BlockMemory {
   }
 };
 
-// One rendezvous of an allocation with a group: its own signal pad and the
-// peer tables. Shared by the handles of that rendezvous.
+// One rendezvous of an allocation with a group: its own signal pad, the peer
+// tables and device communicators. Shared by the handles of that rendezvous.
 struct PeerAlloc {
   std::shared_ptr<CommGroup> group;
   std::shared_ptr<BlockMemory> memory; // its window is released with it
@@ -388,6 +382,10 @@ struct PeerAlloc {
   std::vector<void*> buffers;
   std::vector<void*> pads;
   void** tables_dev = nullptr; // buffers, then pads
+  // Created after this rendezvous's windows, so they know them, and
+  // destroyed before those windows are released.
+  std::mutex mutex; // guards dev_comms
+  std::map<int, void*> dev_comms; // by lsa_barrier_count
 
   PeerAlloc() = default;
   PeerAlloc(const PeerAlloc&) = delete;
@@ -398,6 +396,9 @@ struct PeerAlloc {
       DeviceGuard guard(device);
       // A handle may die with work in flight on its pad or buffer.
       (void)hipDeviceSynchronize();
+      for (auto& [count, dev_comm] : dev_comms) {
+        (void)mori_cco().devCommDestroy(group->comm, dev_comm);
+      }
       if (tables_dev) {
         (void)hipFree(tables_dev);
       }
@@ -1064,18 +1065,18 @@ void* MoriSymmetricMemory::get_dev_comm(int lsa_barrier_count) {
   TORCH_CHECK(
       lsa_barrier_count >= 0,
       "MORI symmetric memory: lsa_barrier_count must be non-negative");
-  auto& group = *peer_->group;
-  std::lock_guard<std::mutex> lock(group.mutex);
-  auto it = group.dev_comms.find(lsa_barrier_count);
-  if (it != group.dev_comms.end()) {
+  auto& peer = *peer_;
+  std::lock_guard<std::mutex> lock(peer.mutex);
+  auto it = peer.dev_comms.find(lsa_barrier_count);
+  if (it != peer.dev_comms.end()) {
     return it->second;
   }
   moriCcoDevCommRequirements_t reqs = MORI_CCO_DEV_COMM_REQUIREMENTS_INIT;
   reqs.lsaBarrierCount = lsa_barrier_count;
   void* dev_comm = nullptr;
-  DeviceGuard guard(group.device);
-  C10D_MORI_CHECK(mori_cco().devCommCreate(group.comm, &reqs, &dev_comm));
-  group.dev_comms.emplace(lsa_barrier_count, dev_comm);
+  DeviceGuard guard(peer.device);
+  C10D_MORI_CHECK(mori_cco().devCommCreate(peer.group->comm, &reqs, &dev_comm));
+  peer.dev_comms.emplace(lsa_barrier_count, dev_comm);
   return dev_comm;
 }
 

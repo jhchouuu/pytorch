@@ -517,6 +517,12 @@ class MoriSymmetricMemoryTest(_MoriTestMixin, MultiProcContinuousTest):
         dev_comm = ext.dev_comm(hdl, lsa_barrier_count=1)
         self.assertNotEqual(dev_comm, 0)
         self.assertEqual(ext.dev_comm(hdl, lsa_barrier_count=1), dev_comm)
+        # A later rendezvous gets its own, which knows its windows.
+        later = symm_mem.rendezvous(symm_mem.empty(64, device=self.device), group_name)
+        self.assertNotIn(ext.dev_comm(later), (0, dev_comm))
+        del hdl
+        torch.cuda.synchronize()
+        self.assertNotEqual(ext.dev_comm(later, lsa_barrier_count=2), 0)
 
 
 @skip_without_mori

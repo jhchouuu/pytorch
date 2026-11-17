@@ -120,7 +120,7 @@ hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
 - Kernels written against MORI's device API can get the MORI-CCO device
   window of a rendezvous, and a device communicator of its group, from
   `torch._mori.window(hdl)`, `torch._mori.signal_pad_window(hdl)`, and
-  `torch._mori.dev_comm(hdl)`.
+  `torch._mori.dev_comm(hdl)`. They are valid while the handle lives.
 
 ## Why Symmetric Memory?
 

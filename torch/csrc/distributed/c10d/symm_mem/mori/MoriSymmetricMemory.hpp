@@ -47,8 +47,9 @@ class MoriSymmetricMemory : public SymmetricMemory {
   void* get_window();
   void* get_signal_pad_window();
 
-  // A device communicator (mori::cco::ccoDevComm*) of the group, created on
-  // first use and cached by lsa_barrier_count. Collective on first use.
+  // A device communicator (mori::cco::ccoDevComm*) of the group for this
+  // rendezvous, created on first use and cached by lsa_barrier_count; it lives
+  // as long as the rendezvous. Collective on first use.
   void* get_dev_comm(int lsa_barrier_count);
 
  private:
