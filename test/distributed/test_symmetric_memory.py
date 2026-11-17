@@ -4049,6 +4049,29 @@ class SymmMemBackendEnvTest(TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @requires_cuda
+    def test_unsupported_device_type_with_backend_set_at_load(self) -> None:
+        # The backend TORCH_SYMMMEM names is set while libtorch loads. A lookup
+        # for a device type with no backend must not blame the variable.
+        result = self._run_script(
+            """
+            import torch
+            import torch.distributed._symmetric_memory as symm_mem
+
+            assert symm_mem.get_backend("cuda") == "CUDA"
+            try:
+                symm_mem.empty(16, device="cpu")
+            except RuntimeError as e:
+                msg = str(e)
+                assert "does not support device type cpu" in msg, msg
+                assert "TORCH_SYMMMEM" not in msg, msg
+            else:
+                raise AssertionError("allocated on cpu")
+            """,
+            "CUDA",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 class SymmMemSingleProcTest(TestCase):
     @requires_accelerator
