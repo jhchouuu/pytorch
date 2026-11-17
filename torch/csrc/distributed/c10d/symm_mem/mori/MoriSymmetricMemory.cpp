@@ -65,6 +65,36 @@ class DeviceGuard {
   bool restore_ = false;
 };
 
+#ifndef TORCH_MORI_ARCHS
+#error "TORCH_MORI_ARCHS must list the archs torch._mori is built for"
+#endif
+
+// The signal-pad kernels exist only for the archs torch._mori is built for.
+void check_device_arch(int device) {
+  static std::mutex mutex;
+  static std::set<int> checked;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (checked.count(device)) {
+    return;
+  }
+  hipDeviceProp_t prop{};
+  C10_HIP_CHECK(hipGetDeviceProperties(&prop, device));
+  std::string arch(prop.gcnArchName);
+  arch = arch.substr(0, arch.find(':'));
+  const std::string built = TORCH_MORI_ARCHS;
+  TORCH_CHECK(
+      ("," + built + ",").find("," + arch + ",") != std::string::npos,
+      "MORI symmetric memory: device ",
+      device,
+      " is ",
+      arch,
+      ", but this torch._mori was built for ",
+      built,
+      ". MORI supports gfx942, gfx950 and gfx1250; rebuild with them in "
+      "PYTORCH_ROCM_ARCH.");
+  checked.insert(device);
+}
+
 hipStream_t current_stream(int device) {
   return c10::hip::getCurrentHIPStream(static_cast<c10::DeviceIndex>(device))
       .stream();
@@ -442,6 +472,7 @@ class MoriSymmetricMemoryAllocator : public SymmetricMemoryAllocator {
       C10_HIP_CHECK(hipGetDevice(&device_idx));
     }
     DeviceGuard guard(device_idx);
+    check_device_arch(device_idx);
     check_not_capturing(
         device_idx,
         "alloc",

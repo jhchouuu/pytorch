@@ -544,6 +544,16 @@ if(BUILD_PYTHON AND NOT BUILD_LIBTORCH_WHL)
       PROPERTIES LANGUAGE HIP)
     target_include_directories(_mori PRIVATE
       "${PROJECT_SOURCE_DIR}/third_party/mori/include")
+    # Base arch names, so alloc() can refuse a device the kernels lack.
+    set(_mori_archs)
+    foreach(_arch ${MORI_HIP_ARCHITECTURES})
+      string(REGEX REPLACE ":.*" "" _arch "${_arch}")
+      list(APPEND _mori_archs "${_arch}")
+    endforeach()
+    list(REMOVE_DUPLICATES _mori_archs)
+    list(JOIN _mori_archs "," _mori_archs)
+    target_compile_definitions(_mori PRIVATE
+      "TORCH_MORI_ARCHS=\"${_mori_archs}\"")
     target_link_libraries(_mori PRIVATE
       torch_python torch_hip pybind::pybind11 ${CMAKE_DL_LIBS})
     set_target_properties(_mori PROPERTIES
