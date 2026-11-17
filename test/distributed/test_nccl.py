@@ -1443,6 +1443,14 @@ class NCCLSymmetricMemoryTest(MultiProcContinuousTest):
             symm_mem.wait_signal(hdl, src_rank)
             self.assertEqual(dst, torch.full_like(dst, float(src_rank)))
 
+        # Misuse raises the same ValueError as on the other backends.
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            symm_mem.put_signal(src[::2], hdl, 0)
+        with self.assertRaisesRegex(ValueError, "invalid peer"):
+            symm_mem.put_signal(src, hdl, self.world_size)
+        with self.assertRaisesRegex(ValueError, "invalid peer"):
+            symm_mem.wait_signal(hdl, -1)
+
         c10d.barrier()
 
     @skip_but_pass_in_sandcastle_if(IS_WINDOWS, "NCCL doesn't support Windows")

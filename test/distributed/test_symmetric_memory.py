@@ -1175,7 +1175,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         symm_mem.reduce_scatter_offset(buf, out, group_name, dim=dim)
         self.assertEqual(out[0], torch.full_like(out[0], rank_sum))
 
-        with self.assertRaisesRegex(ValueError, r"len\(out\) must be 1"):
+        # Same exception type as the NCCL op's checks.
+        with self.assertRaisesRegex(RuntimeError, r"len\(out\) must be 1"):
             symm_mem.reduce_scatter_offset(buf, [], group_name, dim=dim)
 
     @skipIfXpu(
@@ -1230,6 +1231,9 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
                 received,
                 torch.full((rows, cols), 100.0 * peer + self.rank, device=self.device),
             )
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported"):
+            symm_mem.all_to_all_nd(buf, out, scatter_dim, scatter_dim, group=group_name)
 
     @skipIfXpu(
         msg="XPU symm mem aborts (SIGABRT) instead of raising: https://github.com/intel/torch-xpu-ops/issues/5404"

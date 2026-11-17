@@ -2554,22 +2554,12 @@ def _lsa_get_out(
 
 
 def _lsa_put_signal(src: torch.Tensor, hdl: _SymmetricMemory, peer: int) -> None:
-    if src.device != hdl.device:
-        raise ValueError("put_signal: src must be on the same device as hdl")
-    if not src.is_contiguous():
-        raise ValueError("put_signal: src must be backed by contiguous memory")
-    if peer < 0 or peer >= hdl.world_size:
-        raise ValueError("put_signal: invalid peer")
-    if hdl.offset + src.numel() * src.element_size() > hdl.buffer_size:
-        raise ValueError("put_signal: src exceeds symmetric allocation")
     _check_peer_access("put_signal", hdl, peer)
     hdl.get_remote_tensor(peer, src.shape, src.dtype).copy_(src)
     hdl.put_signal(peer)
 
 
 def _lsa_wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
-    if peer < 0 or peer >= hdl.world_size:
-        raise ValueError("wait_signal: invalid peer")
     # The wait spins on the local pad, so check the peer the way its sender does.
     _check_peer_access("wait_signal", hdl, peer)
     hdl.wait_signal(peer)
@@ -2661,6 +2651,15 @@ def put_signal(src: torch.Tensor, hdl: _SymmetricMemory, peer: int) -> None:
         hdl (SymmetricMemory): the symmetric memory to put data to.
         peer (int): the peer to put data to.
     """
+    if src.device != hdl.device:
+        raise ValueError("put_signal: src must be on the same device as hdl")
+    if not src.is_contiguous():
+        raise ValueError("put_signal: src must be backed by contiguous memory")
+    if peer < 0 or peer >= hdl.world_size:
+        raise ValueError("put_signal: invalid peer")
+    if hdl.offset + src.numel() * src.element_size() > hdl.buffer_size:
+        raise ValueError("put_signal: src exceeds symmetric allocation")
+
     backend = get_backend(src.device)
     if backend == "NCCL":
         # `hdl` is a pybind `_SymmetricMemory` object. Dispatcher expects the
@@ -2687,6 +2686,9 @@ def wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
         hdl (SymmetricMemory): the symmetric memory handle on which to wait for a signal.
         peer (int): the peer to wait for a signal from.
     """
+    if peer < 0 or peer >= hdl.world_size:
+        raise ValueError("wait_signal: invalid peer")
+
     backend = get_backend(hdl.device)
     if backend == "NCCL":
         # See note in `put_signal` about `_SymmetricMemory` vs TorchBind type.
@@ -2711,7 +2713,7 @@ def _peer_view(hdl: _SymmetricMemory, peer: int, t: torch.Tensor) -> torch.Tenso
 def _rendezvous_lsa(op: str, input: torch.Tensor, group: str) -> _SymmetricMemory:
     hdl = rendezvous(input, c10d.GroupName(group))
     if hdl is None:
-        raise ValueError(f"{op}: input must be allocated via symmetric memory")
+        raise RuntimeError(f"{op}: input must be allocated via symmetric memory")
     for peer in range(hdl.world_size):
         _check_peer_access(op, hdl, peer)
     return hdl
@@ -2728,19 +2730,19 @@ def _lsa_reduce_scatter_offset(
 ) -> None:
     op = "reduce_scatter_offset"
     if red_op != "sum":
-        raise ValueError(f"{op}: only red_op='sum' is supported, got {red_op!r}")
+        raise RuntimeError(f"{op}: only red_op='sum' is supported, got {red_op!r}")
     if input.dim() != 2:
-        raise ValueError(f"{op}: input must be 2-D")
+        raise RuntimeError(f"{op}: input must be 2-D")
     if dim not in (0, 1):
-        raise ValueError(f"{op}: dim must be 0 or 1, got {dim}")
+        raise RuntimeError(f"{op}: dim must be 0 or 1, got {dim}")
     if input.stride(-1) != 1:
-        raise ValueError(f"{op}: innermost dimension must be contiguous")
+        raise RuntimeError(f"{op}: innermost dimension must be contiguous")
     hdl = _rendezvous_lsa(op, input, group)
     world_size, rank = hdl.world_size, hdl.rank
 
     if offsets is None:
         if input.size(dim) % world_size != 0:
-            raise ValueError(
+            raise RuntimeError(
                 f"{op}: input.size({dim})={input.size(dim)} must be divisible by "
                 f"group size ({world_size})"
             )
@@ -2750,44 +2752,44 @@ def _lsa_reduce_scatter_offset(
     if dst_ranks is None:
         dst_ranks = [i % world_size for i in range(n_blocks)]
     if n_blocks == 0:
-        raise ValueError(f"{op}: must have at least one block")
+        raise RuntimeError(f"{op}: must have at least one block")
     if len(dst_ranks) != n_blocks:
-        raise ValueError(f"{op}: dst_ranks.size() must match offsets.size()")
+        raise RuntimeError(f"{op}: dst_ranks.size() must match offsets.size()")
     if offsets[-1] > input.size(dim):
-        raise ValueError(f"{op}: offsets exceed input size along dim {dim}")
+        raise RuntimeError(f"{op}: offsets exceed input size along dim {dim}")
     starts = [0, *offsets[:-1]]
     # The j-th block owned by a rank must have the same size on every rank.
     sizes: list[int] = []
     seen = [0] * world_size
     for i, dst_rank in enumerate(dst_ranks):
         if not 0 <= dst_rank < world_size:
-            raise ValueError(f"{op}: invalid dst rank {dst_rank}")
+            raise RuntimeError(f"{op}: invalid dst rank {dst_rank}")
         size = offsets[i] - starts[i]
         if size < 0:
-            raise ValueError(f"{op}: offsets must be non-decreasing")
+            raise RuntimeError(f"{op}: offsets must be non-decreasing")
         j = seen[dst_rank]
         seen[dst_rank] += 1
         if j == len(sizes):
             sizes.append(size)
         elif sizes[j] != size:
-            raise ValueError(
+            raise RuntimeError(
                 f"{op}: all output at position j={j} must have equal size across "
                 "all ranks"
             )
     owned = [i for i, dst_rank in enumerate(dst_ranks) if dst_rank == rank]
     if len(owned) * world_size != n_blocks:
-        raise ValueError(f"{op}: dst_ranks must distribute blocks evenly")
+        raise RuntimeError(f"{op}: dst_ranks must distribute blocks evenly")
     if len(out) != len(owned):
-        raise ValueError(f"{op}: len(out) must be {len(owned)}")
+        raise RuntimeError(f"{op}: len(out) must be {len(owned)}")
     for j, (i, o) in enumerate(zip(owned, out)):
         size = offsets[i] - starts[i]
         shape = (input.size(0), size) if dim == 1 else (size, input.size(1))
         if tuple(o.shape) != shape:
-            raise ValueError(f"{op}: out[{j}] must have shape {shape}")
+            raise RuntimeError(f"{op}: out[{j}] must have shape {shape}")
         if not o.is_contiguous():
-            raise ValueError(f"{op}: out[{j}] must be contiguous")
+            raise RuntimeError(f"{op}: out[{j}] must be contiguous")
         if o.dtype != input.dtype:
-            raise ValueError(f"{op}: out[{j}] must have the same dtype as input")
+            raise RuntimeError(f"{op}: out[{j}] must have the same dtype as input")
 
     peers = [_peer_view(hdl, peer, input) for peer in range(world_size)]
     acc_dtype = (
@@ -2814,16 +2816,16 @@ def _lsa_all_to_all_nd(
 ) -> None:
     op = "all_to_all_nd"
     if (scatter_dim, gather_dim) not in ((1, 0), (0, 1)):
-        raise ValueError(
+        raise RuntimeError(
             f"{op}: unsupported (scatter_dim, gather_dim) = ({scatter_dim}, "
             f"{gather_dim}); supported pairs are (1, 0) and (0, 1)"
         )
     if input.stride(-1) != 1:
-        raise ValueError(f"{op}: innermost dimension must be contiguous")
+        raise RuntimeError(f"{op}: innermost dimension must be contiguous")
     if not out.is_contiguous():
-        raise ValueError(f"{op}: out must be contiguous")
+        raise RuntimeError(f"{op}: out must be contiguous")
     if out.dtype != input.dtype:
-        raise ValueError(f"{op}: out must have the same dtype as input")
+        raise RuntimeError(f"{op}: out must have the same dtype as input")
     hdl = _rendezvous_lsa(op, input, group)
     world_size, rank = hdl.world_size, hdl.rank
 
@@ -2836,7 +2838,7 @@ def _lsa_all_to_all_nd(
     elif input.dim() == 3 and input.size(split) == world_size:
         src = input
     else:
-        raise ValueError(
+        raise RuntimeError(
             f"{op}: input must be 2-D with size({split}) divisible by the group "
             f"size ({world_size}), or 3-D with size({split}) equal to it"
         )
@@ -2847,7 +2849,7 @@ def _lsa_all_to_all_nd(
         _, local_rows, cols = src.shape
         shapes = ((local_rows, world_size, cols), (local_rows, world_size * cols))
     if tuple(out.shape) not in shapes:
-        raise ValueError(f"{op}: out must have shape {shapes[0]} or {shapes[1]}")
+        raise RuntimeError(f"{op}: out must have shape {shapes[0]} or {shapes[1]}")
     dst = out.view(shapes[0])
 
     # Every rank's input is complete before anyone reads it.
