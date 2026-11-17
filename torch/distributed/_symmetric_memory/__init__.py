@@ -2390,7 +2390,7 @@ def is_nvshmem_available() -> bool:
     return _is_nvshmem_available()
 
 
-def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL"]) -> None:
+def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL", "MORI"]) -> None:
     r"""
     Set the backend for symmetric memory allocation. This is a global setting
     and affects all subsequent calls to
@@ -2403,9 +2403,13 @@ def set_backend(name: Literal["NVSHMEM", "CUDA", "NCCL"]) -> None:
     :func:`get_backend` returns ``None`` (with a one-time warning) and
     allocation raises an error.
 
+    ``"MORI"`` is available on ROCm builds with ``USE_MORI=1``. Its runtime
+    comes from the ``amd-mori`` package and is loaded when the backend is
+    first selected; without it, this raises an ``ImportError``.
+
     Args:
         name (str): the backend for symmetric memory allocation. Currently,
-            only `"NVSHMEM"`, `"CUDA"`, `"NCCL"` are supported.
+            only `"NVSHMEM"`, `"CUDA"`, `"NCCL"` and `"MORI"` are supported.
     """
     _SymmetricMemory.set_backend(name)
 

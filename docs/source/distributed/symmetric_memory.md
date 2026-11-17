@@ -58,8 +58,9 @@ compiler to select a Symmetric Memory fusion when applicable.
 (symmetric-memory-stream-ordering)=
 ### Stream ordering
 
-Built-in CUDA-backend barriers, signal operations, and collectives, and the
-NCCL backend's `barrier`, `reduce_scatter_offset`, and `all_to_all_nd`, run in
+Built-in CUDA-backend barriers, signal operations, and collectives, the MORI
+backend's `barrier`, `put_signal`, and `wait_signal`, and the NCCL backend's
+`barrier`, `reduce_scatter_offset`, and `all_to_all_nd`, run in
 issue order across streams for each process group and device: they share the
 group's signal pad or the barriers of its NCCL device communicator. Under CUDA
 graph capture, the operations of the capture in progress are ordered among
@@ -71,6 +72,53 @@ operations built on NCCL's own signal APIs (`ncclSignal`, `ncclPutSignal`,
 `ncclWaitSignal`), such as the NCCL backend's `put_signal` and `wait_signal`,
 or custom kernels that use a raw signal-pad tensor. Issue those uncovered
 operations for a group from one stream, or explicitly order their streams.
+
+## Backends
+
+A backend provides the allocator behind `empty` and `rendezvous`. Select one
+with {func}`set_backend` before the first allocation, or with the
+`TORCH_SYMMMEM` environment variable.
+
+| Backend | Platform | Notes |
+| --- | --- | --- |
+| `CUDA` | CUDA, ROCm | The default. |
+| `NVSHMEM` | CUDA (NVSHMEM), ROCm (rocSHMEM) | Needs the SHMEM library; provides the `nvshmem_*` operators. |
+| `NCCL` | CUDA, ROCm (RCCL) | Registers allocations as NCCL windows. |
+| `MORI` | ROCm (gfx942, gfx950, gfx1250) | Peers on the same node. Built with `USE_MORI=1`; the runtime comes from the `amd-mori` package. See [MORI backend](mori-backend). |
+
+(mori-backend)=
+### MORI backend
+
+The `MORI` backend maps symmetric allocations with MORI-CCO, AMD's
+communication library. PyTorch includes it when built with `USE_MORI=1`, but
+loads it only when it is selected: `import torch` does not load MORI. At first
+use, PyTorch reuses the MORI runtime that `import mori` loaded, or loads the
+`libmori_cco.so.1` installed by the `amd-mori` package (`pip install
+amd-mori`). Without that package, selecting the backend raises an `ImportError`.
+
+```python
+import torch.distributed as dist
+import torch.distributed._symmetric_memory as symm_mem
+
+symm_mem.set_backend("MORI")  # or run with TORCH_SYMMMEM=MORI
+t = symm_mem.empty(4096, device="cuda")
+hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
+```
+
+- Allocations are HIP virtual-memory allocations. The first `rendezvous` of a
+  tensor with a group maps it into every peer on the same node, and gives that
+  (tensor, group) pair its own signal pad. Peers on other nodes have no
+  mapping: their entries in `buffer_ptrs` and `signal_pad_ptrs` are 0.
+- `barrier`, `put_signal`, and `wait_signal` follow the CUDA backend's
+  signal-pad protocol on the current stream, with channels and timeouts.
+  Built-in collectives such as `one_shot_all_reduce` work unchanged.
+- `empty` and the first `rendezvous` of a tensor with a group cannot be
+  captured in a graph; later `rendezvous` calls and the collectives can.
+- MemPool is supported.
+- Kernels written against MORI's device API can get the MORI-CCO device
+  window of a rendezvous, and a device communicator of its group, from
+  `torch._mori.window(hdl)`, `torch._mori.signal_pad_window(hdl)`, and
+  `torch._mori.dev_comm(hdl)`.
 
 ## Why Symmetric Memory?
 
@@ -345,8 +393,8 @@ result tensor will be created from symmetric memory too.
         y = torch.mm(x, w)
 ```
 
-As of torch 2.11, the `CUDA` and `NVSHMEM` backends support MemPool. MemPool
-support of the `NCCL` backend is in progress.
+As of torch 2.11, the `CUDA` and `NVSHMEM` backends support MemPool, and so
+does the `MORI` backend. MemPool support of the `NCCL` backend is in progress.
 
 :::{warning}
 Allocations from a CUDA symmetric memory pool must remain symmetric across
