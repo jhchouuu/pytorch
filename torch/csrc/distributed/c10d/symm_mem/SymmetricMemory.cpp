@@ -88,6 +88,7 @@ class AllocatorMap {
     std::lock_guard<std::mutex> lock(mutex_);
     auto allocator = find_allocator(device_type);
     if (!allocator) {
+      warn_if_unregistered();
       return std::nullopt;
     }
     return allocator->name();
@@ -101,12 +102,8 @@ class AllocatorMap {
       const auto& requested = requested_backend();
       TORCH_CHECK(
           !requested.has_value() || is_registered(*requested),
-          "TORCH_SYMMMEM is set to '",
-          requested.value_or(""),
-          "', but no SymmetricMemory backend with that name is registered "
-          "(registered: ",
-          registered_names(),
-          "). A backend provided by another library must be registered, "
+          unregistered_message(requested.value_or("")),
+          " A backend provided by another library must be registered, "
           "e.g. by importing that library, before its first use.");
       TORCH_CHECK(
           false, "SymmetricMemory does not support device type ", device_type);
@@ -117,7 +114,11 @@ class AllocatorMap {
 
   bool has_allocator(c10::DeviceType device_type) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return find_allocator(device_type).defined();
+    if (find_allocator(device_type)) {
+      return true;
+    }
+    warn_if_unregistered();
+    return false;
   }
 
   ~AllocatorMap() {
@@ -167,6 +168,30 @@ class AllocatorMap {
       names.insert(entry.second->name());
     }
     return c10::Join(", ", names);
+  }
+
+  // Requires mutex_.
+  std::string unregistered_message(const std::string& name) const {
+    return c10::str(
+        "TORCH_SYMMMEM is set to '",
+        name,
+        "', but no SymmetricMemory backend with that name is registered "
+        "(registered: ",
+        registered_names(),
+        ").");
+  }
+
+  // Requires mutex_. Queries do not throw, so they report an unregistered
+  // TORCH_SYMMMEM name once instead.
+  void warn_if_unregistered() const {
+    const auto& requested = requested_backend();
+    if (requested.has_value() && !is_registered(*requested)) {
+      TORCH_WARN_ONCE(
+          unregistered_message(*requested),
+          " Until a backend with that name is registered (e.g. by importing "
+          "the library that provides it) or set_backend() is called, "
+          "get_backend() returns None and symmetric memory is not used.");
+    }
   }
 
   std::mutex mutex_;

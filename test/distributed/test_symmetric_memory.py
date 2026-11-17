@@ -4048,6 +4048,13 @@ class SymmMemBackendEnvTest(TestCase):
             "NOT_A_BACKEND",
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Queries do not raise, so they warn about the name once.
+        self.assertEqual(
+            result.stderr.count("TORCH_SYMMMEM is set to 'NOT_A_BACKEND'"),
+            1,
+            result.stderr,
+        )
+        self.assertIn("get_backend() returns None", result.stderr)
 
     @requires_cuda
     def test_unsupported_device_type_with_backend_set_at_load(self) -> None:
