@@ -1091,6 +1091,44 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
     )
     @skip_if_lt_x_gpu(2)
+    def test_put_wait_signal_unreachable_peer(self) -> None:
+        self._init_process()
+        if symm_mem.get_backend(self.device) == "NCCL":
+            self.skipTest("NCCL reaches peers through its own API")
+        group_name = dist.group.WORLD.group_name
+        peer = (self.rank + 1) % self.world_size
+        t = symm_mem.empty(16, device=self.device)
+        hdl = symm_mem.rendezvous(t, group=group_name)
+
+        class NoLoadStore:
+            # hdl as seen by a rank that cannot load/store `peer`'s memory.
+            def __init__(self) -> None:
+                self.buffer_ptrs = [
+                    0 if r == peer else ptr for r, ptr in enumerate(hdl.buffer_ptrs)
+                ]
+
+            def __getattr__(self, name):
+                return getattr(hdl, name)
+
+            def put_signal(self, *args, **kwargs):
+                raise AssertionError("put_signal was enqueued")
+
+            def wait_signal(self, *args, **kwargs):
+                raise AssertionError("wait_signal was enqueued")
+
+        # Both ends of the pair raise, so neither is left waiting on the other.
+        with self.assertRaisesRegex(ValueError, "not reachable"):
+            symm_mem.put_signal(t, NoLoadStore(), peer)
+        with self.assertRaisesRegex(ValueError, "not reachable"):
+            symm_mem.wait_signal(NoLoadStore(), peer)
+
+    @skipIfXpu(
+        msg="XPU symm mem gaps are tracked in https://github.com/intel/torch-xpu-ops/issues/5404"
+    )
+    @skipIf(
+        not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
+    )
+    @skip_if_lt_x_gpu(2)
     @parametrize("dim", [0, 1])
     @parametrize("uneven", [False, True])
     def test_reduce_scatter_offset(self, dim: int, uneven: bool) -> None:
