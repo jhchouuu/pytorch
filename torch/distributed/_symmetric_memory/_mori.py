@@ -66,7 +66,14 @@ def _unavailable_reason() -> str | None:
 def _load_library(ext: ModuleType) -> None:
     # Reuse the copy `import mori` loaded, so the process holds only one. The
     # package also ships libmori_cco.so, a separate copy meant for linkers.
-    if not ext.load(""):
+    try:
+        loaded = ext.load("")
+    except RuntimeError as e:
+        raise ImportError(
+            f"The MORI symmetric memory backend cannot use the {_PACKAGE} "
+            f"runtime already loaded in this process: {e}"
+        ) from e
+    if not loaded:
         path = _find_library(ext.LIBRARY_SONAME)
         try:
             ext.load(path)

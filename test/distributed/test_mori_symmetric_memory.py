@@ -8,8 +8,10 @@
 import functools
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from collections.abc import Callable
 from typing import Any
@@ -153,6 +155,37 @@ class MoriLoaderTest(TestCase):
             hide_mori=True,
             TORCH_SYMMMEM="MORI",
         )
+
+    @skipUnless(importlib.util.find_spec("torch._mori"), "needs USE_MORI=1")
+    def test_pre_c_abi_runtime_loaded(self) -> None:
+        # A libmori_cco.so without the C ABI already in the process is an
+        # ImportError, whatever was imported first.
+        cc = shutil.which("cc") or shutil.which("gcc")
+        if cc is None:
+            self.skipTest("needs a C compiler")
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = os.path.join(tmp, "libmori_cco.so")
+            subprocess.run(
+                [cc, "-shared", "-fPIC", "-Wl,-soname,libmori_cco.so"]
+                + ["-o", stub, "-x", "c", "/dev/null"],
+                check=True,
+            )
+            self._run(
+                """
+                import ctypes, os
+                import torch
+                import torch.distributed._symmetric_memory as symm_mem
+
+                ctypes.CDLL(os.environ["MORI_STUB"])
+                try:
+                    symm_mem.set_backend("MORI")
+                except ImportError as e:
+                    assert "amd-mori" in str(e) and "C ABI" in str(e), e
+                else:
+                    raise AssertionError("loaded MORI next to a pre-C-ABI runtime")
+                """,
+                MORI_STUB=stub,
+            )
 
     @requires_mori
     def test_loads_package_copy(self) -> None:
