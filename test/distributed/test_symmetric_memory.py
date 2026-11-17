@@ -221,6 +221,22 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         backend = symm_mem.get_backend(device_type)
         self.assertIsNotNone(backend)
 
+    @skipIf(
+        not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
+    )
+    @skip_if_lt_x_gpu(2)
+    def test_set_backend_to_current(self) -> None:
+        # Selecting the backend in use is a no-op, including a default backend
+        # that was never selected by name.
+        backend = symm_mem.get_backend(self.device)
+        self.assertIsNotNone(backend)
+        symm_mem.set_backend(backend)
+        self.assertEqual(symm_mem.get_backend(self.device), backend)
+        # Still a no-op once the backend has been used.
+        symm_mem.empty(64, device=self.device)
+        symm_mem.set_backend(backend)
+        self.assertEqual(symm_mem.get_backend(self.device), backend)
+
     @skip_if_rocm_multiprocess
     @skipIf(device_type != "cuda", "NVLink DMA connectivity detection is CUDA-specific")
     @skip_if_lt_x_gpu(2)
