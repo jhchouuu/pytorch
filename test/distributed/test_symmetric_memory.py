@@ -98,6 +98,10 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 test_contexts = [nullcontext, _test_mode]
 
+# Backends whose barrier and signals are torch's signal-pad kernels, ordered by
+# GroupStreamGuard.
+_SIGNAL_PAD_BACKENDS = ("CUDA", "MORI")
+
 
 # Each op touches the signal pad through one guarded call site. The mixed pairs
 # check that call sites in different files share one group's ordering state.
@@ -354,10 +358,10 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         # implicitly using the default stream.
         self._init_process()
 
-        # Only the CUDA backend is fixed; NCCL/NVSHMEM still issue these ops
-        # synchronously on the default stream.
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        # Only the CUDA and MORI backends are fixed; NCCL/NVSHMEM still issue
+        # these ops synchronously on the default stream.
+        if symm_mem.get_backend(self.device) not in ("CUDA", "MORI"):
+            self.skipTest("test applies to the CUDA and MORI symm mem backends")
 
         stream = device_module.Stream()
         with torch.profiler.profile(
@@ -459,8 +463,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         symm_mem_barrier, index the pad this way, so the layout must not move.
         """
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
         t = symm_mem.empty(64, device=self.device)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
         channel = 3
@@ -1370,8 +1374,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         completes before every rank arrived and the fill on stream B lands
         before the fill on stream A. The peer then reads the wrong value."""
         self._init_process()
-        if symm_mem.get_backend(self.device) not in ("CUDA", "XPU"):
-            self.skipTest("test applies to the CUDA and XPU symm mem backends")
+        if symm_mem.get_backend(self.device) not in (*_SIGNAL_PAD_BACKENDS, "XPU"):
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
@@ -1412,8 +1416,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         signal, so round two completes out of order and the final fill is not
         the one the peer observes."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
@@ -1459,8 +1463,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         recorded at the start of B's guard instead of right after A's launch,
         B would also wait for the sleep and this would fail."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
@@ -1505,8 +1509,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         import threading
 
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
@@ -1579,8 +1583,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         here differ by name, so this covers group isolation generally, not the
         identity keying, which only differs under thread isolation mode."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t_a = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         t_b = symm_mem.empty(64, dtype=torch.float32, device=device_type)
@@ -1648,8 +1652,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         Exercises the GroupStreamGuard placement in
         CUDASymmetricMemoryOps.cu."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         group_name = dist.group.WORLD.group_name
 
@@ -1688,8 +1692,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         """A barrier captured in a CUDA graph replays correctly. Inside a
         capture the guard's event record and wait become graph nodes."""
         self._init_process()
-        if symm_mem.get_backend(self.device) not in ("CUDA", "XPU"):
-            self.skipTest("test applies to the CUDA and XPU symm mem backends")
+        if symm_mem.get_backend(self.device) not in (*_SIGNAL_PAD_BACKENDS, "XPU"):
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
@@ -1727,8 +1731,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         graph, recorded only when the graph runs, so waiting on it from
         outside the capture is invalid."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
@@ -1770,8 +1774,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         rank. Replayed several times: a balanced pad protocol must leave the
         pad zero between replays."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, dtype=torch.float32, device=device_type)
         hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
@@ -1851,8 +1855,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         Checked on a captured graph that is never replayed, with op_b on a
         stream forked before op_a. One op per guarded call site."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
         if "multimem" in op_a + op_b and not _SymmetricMemory.has_multicast_support(
             DeviceType.CUDA, self.device.index
         ):
@@ -1899,8 +1903,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         or of another group. b must stay blocked on the same group, and once
         the first gate opens it must finish with the second still closed."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         group_b = (
             dist.group.WORLD
@@ -1936,8 +1940,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         unlike torch.cuda.graph does not synchronize the device first, so a is
         still held when the capture runs."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         t = symm_mem.empty(64, device="cuda")
         hdl = symm_mem.rendezvous(t, dist.group.WORLD)
@@ -1973,8 +1977,8 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
         on another stream in a capture it cannot see, and two barriers forked
         inside it are ordered. The eager ordering is kept across both."""
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("test applies to the CUDA symm mem backend")
+        if symm_mem.get_backend(self.device) not in _SIGNAL_PAD_BACKENDS:
+            self.skipTest("test applies to backends using the signal-pad kernels")
 
         hdl = symm_mem.rendezvous(symm_mem.empty(64, device="cuda"), dist.group.WORLD)
         barrier = [lambda: hdl.barrier(channel=0)]
@@ -3470,8 +3474,10 @@ class SymmetricMemoryTestCudaGraph(MultiProcContinuousTest):
     @skip_if_rocm_ver_lessthan_multiprocess((10, 1))
     def test_alloc_and_first_rendezvous_during_capture_raise(self) -> None:
         self._init_process()
-        if symm_mem.get_backend(self.device) != "CUDA":
-            self.skipTest("the capture guard is implemented in the CUDA backend")
+        if symm_mem.get_backend(self.device) not in ("CUDA", "MORI"):
+            self.skipTest(
+                "the capture guard is implemented in the CUDA and MORI backends"
+            )
         group_name = dist.group.WORLD.group_name
         msg = "capturing a graph"
 
@@ -4193,6 +4199,12 @@ class SymmMemCleanupTest(TestCase):
             self.skipTest("NCCL symmetric memory requires NCCL >= 2.27")
         if backend == "NVSHMEM" and not symm_mem.is_nvshmem_available():
             self.skipTest("NVSHMEM is not available")
+        if backend == "MORI":
+            from torch.distributed._symmetric_memory._mori import _unavailable_reason
+
+            reason = _unavailable_reason()
+            if reason is not None and os.environ.get("TORCH_TEST_REQUIRE_MORI") != "1":
+                self.skipTest(reason)
         script = f"""
 import torch
 import torch.distributed as dist
@@ -4222,7 +4234,7 @@ tensor = _SymmetricMemory.empty_strided_p2p((1024,), (1,), torch.float32, device
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
-    @parametrize("backend", ["CUDA", "NCCL", "NVSHMEM"])
+    @parametrize("backend", ["CUDA", "NCCL", "NVSHMEM", "MORI"])
     def test_free_waits_for_pending_work(self, device, backend):
         self._run_cleanup(
             device,
