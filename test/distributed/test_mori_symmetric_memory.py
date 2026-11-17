@@ -498,15 +498,6 @@ class MoriSymmetricMemoryTest(_MoriTestMixin, MultiProcContinuousTest):
             symm_mem.rendezvous(t, group=group_name)
 
     @skip_if_lt_x_gpu(2)
-    def test_cpu_affinity_unchanged(self) -> None:
-        # The communicator is created without pinning the calling thread.
-        before = os.sched_getaffinity(0)
-        sub = c10d.new_group(list(range(self.world_size)))
-        symm_mem.set_backend("MORI")
-        symm_mem.rendezvous(symm_mem.empty(64, device=self.device), group=sub)
-        self.assertEqual(os.sched_getaffinity(0), before)
-
-    @skip_if_lt_x_gpu(2)
     def test_device_handles(self) -> None:
         import torch._mori as ext
 
@@ -583,6 +574,16 @@ class MoriLifecycleTest(_MoriTestMixin, MultiProcessTestCase):
         peer = (self.rank + 1) % self.world_size
         self.assertTrue(hdl.get_buffer(peer, (4096,), torch.float32).eq(peer).all())
         hdl.barrier()
+        c10d.destroy_process_group()
+
+    @skip_if_lt_x_gpu(2)
+    def test_cpu_affinity_unchanged(self) -> None:
+        # The first communicator of a fresh process does not pin its thread.
+        self._init()
+        group_name = self._world()
+        before = os.sched_getaffinity(0)
+        symm_mem.rendezvous(symm_mem.empty(64, device=self.device), group_name)
+        self.assertEqual(os.sched_getaffinity(0), before)
         c10d.destroy_process_group()
 
     @skip_if_lt_x_gpu(2)
