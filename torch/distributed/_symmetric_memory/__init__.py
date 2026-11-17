@@ -2693,6 +2693,172 @@ def wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
         _lsa_wait_signal(hdl, peer)
 
 
+def _peer_view(hdl: _SymmetricMemory, peer: int, t: torch.Tensor) -> torch.Tensor:
+    # `t`'s layout over `peer`'s copy of the allocation that `hdl` maps.
+    if hdl.offset % t.element_size() != 0:
+        raise RuntimeError("handle offset is not element-aligned")
+    span = 0
+    if t.numel() > 0:
+        span = 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
+    base = hdl.offset // t.element_size() + t.storage_offset()
+    buf = hdl.get_buffer(peer, (span,), t.dtype, base)
+    return buf.as_strided(t.shape, t.stride())
+
+
+def _rendezvous_lsa(op: str, input: torch.Tensor, group: str) -> _SymmetricMemory:
+    hdl = rendezvous(input, group)
+    if hdl is None:
+        raise ValueError(f"{op}: input must be allocated via symmetric memory")
+    for peer in range(hdl.world_size):
+        _check_peer_access(op, hdl, peer)
+    return hdl
+
+
+def _lsa_reduce_scatter_offset(
+    input: torch.Tensor,
+    out: list[torch.Tensor],
+    group: str,
+    dim: int,
+    offsets: list[int] | None,
+    dst_ranks: list[int] | None,
+    red_op: str,
+) -> None:
+    op = "reduce_scatter_offset"
+    if red_op != "sum":
+        raise ValueError(f"{op}: only red_op='sum' is supported, got {red_op!r}")
+    if input.dim() != 2:
+        raise ValueError(f"{op}: input must be 2-D")
+    if dim not in (0, 1):
+        raise ValueError(f"{op}: dim must be 0 or 1, got {dim}")
+    if input.stride(-1) != 1:
+        raise ValueError(f"{op}: innermost dimension must be contiguous")
+    hdl = _rendezvous_lsa(op, input, group)
+    world_size, rank = hdl.world_size, hdl.rank
+
+    if offsets is None:
+        if input.size(dim) % world_size != 0:
+            raise ValueError(
+                f"{op}: input.size({dim})={input.size(dim)} must be divisible by "
+                f"group size ({world_size})"
+            )
+        block = input.size(dim) // world_size
+        offsets = [(i + 1) * block for i in range(world_size)]
+    n_blocks = len(offsets)
+    if dst_ranks is None:
+        dst_ranks = [i % world_size for i in range(n_blocks)]
+    if n_blocks == 0:
+        raise ValueError(f"{op}: must have at least one block")
+    if len(dst_ranks) != n_blocks:
+        raise ValueError(f"{op}: dst_ranks.size() must match offsets.size()")
+    if offsets[-1] > input.size(dim):
+        raise ValueError(f"{op}: offsets exceed input size along dim {dim}")
+    starts = [0, *offsets[:-1]]
+    # The j-th block owned by a rank must have the same size on every rank.
+    sizes: list[int] = []
+    seen = [0] * world_size
+    for i, dst_rank in enumerate(dst_ranks):
+        if not 0 <= dst_rank < world_size:
+            raise ValueError(f"{op}: invalid dst rank {dst_rank}")
+        size = offsets[i] - starts[i]
+        if size < 0:
+            raise ValueError(f"{op}: offsets must be non-decreasing")
+        j = seen[dst_rank]
+        seen[dst_rank] += 1
+        if j == len(sizes):
+            sizes.append(size)
+        elif sizes[j] != size:
+            raise ValueError(
+                f"{op}: all output at position j={j} must have equal size across "
+                "all ranks"
+            )
+    owned = [i for i, dst_rank in enumerate(dst_ranks) if dst_rank == rank]
+    if len(owned) * world_size != n_blocks:
+        raise ValueError(f"{op}: dst_ranks must distribute blocks evenly")
+    if len(out) != len(owned):
+        raise ValueError(f"{op}: len(out) must be {len(owned)}")
+    for j, (i, o) in enumerate(zip(owned, out)):
+        size = offsets[i] - starts[i]
+        shape = (input.size(0), size) if dim == 1 else (size, input.size(1))
+        if tuple(o.shape) != shape:
+            raise ValueError(f"{op}: out[{j}] must have shape {shape}")
+        if not o.is_contiguous():
+            raise ValueError(f"{op}: out[{j}] must be contiguous")
+        if o.dtype != input.dtype:
+            raise ValueError(f"{op}: out[{j}] must have the same dtype as input")
+
+    peers = [_peer_view(hdl, peer, input) for peer in range(world_size)]
+    acc_dtype = (
+        torch.float32 if input.dtype in (torch.float16, torch.bfloat16) else input.dtype
+    )
+    # Every rank's input is complete before anyone reads it.
+    hdl.barrier()
+    for i, o in zip(owned, out):
+        blocks = [p.narrow(dim, starts[i], offsets[i] - starts[i]) for p in peers]
+        acc = blocks[0].to(acc_dtype, copy=True)
+        for block in blocks[1:]:
+            acc.add_(block)
+        o.copy_(acc)
+    # No rank reuses its input before every peer has read it.
+    hdl.barrier()
+
+
+def _lsa_all_to_all_nd(
+    input: torch.Tensor,
+    out: torch.Tensor,
+    scatter_dim: int,
+    gather_dim: int,
+    group: str,
+) -> None:
+    op = "all_to_all_nd"
+    if (scatter_dim, gather_dim) not in ((1, 0), (0, 1)):
+        raise ValueError(
+            f"{op}: unsupported (scatter_dim, gather_dim) = ({scatter_dim}, "
+            f"{gather_dim}); supported pairs are (1, 0) and (0, 1)"
+        )
+    if input.stride(-1) != 1:
+        raise ValueError(f"{op}: innermost dimension must be contiguous")
+    if not out.is_contiguous():
+        raise ValueError(f"{op}: out must be contiguous")
+    if out.dtype != input.dtype:
+        raise ValueError(f"{op}: out must have the same dtype as input")
+    hdl = _rendezvous_lsa(op, input, group)
+    world_size, rank = hdl.world_size, hdl.rank
+
+    # View input as [rows, G, local_cols] (scatter_dim=1) or
+    # [G, local_rows, cols] (scatter_dim=0), and out as [G, rows, local_cols]
+    # or [local_rows, G, cols].
+    split = 1 if scatter_dim == 1 else 0
+    if input.dim() == 2 and input.size(split) % world_size == 0:
+        src = input.unflatten(split, (world_size, -1))
+    elif input.dim() == 3 and input.size(split) == world_size:
+        src = input
+    else:
+        raise ValueError(
+            f"{op}: input must be 2-D with size({split}) divisible by the group "
+            f"size ({world_size}), or 3-D with size({split}) equal to it"
+        )
+    if scatter_dim == 1:
+        rows, _, local_cols = src.shape
+        shapes = ((world_size, rows, local_cols), (world_size * rows, local_cols))
+    else:
+        _, local_rows, cols = src.shape
+        shapes = ((local_rows, world_size, cols), (local_rows, world_size * cols))
+    if tuple(out.shape) not in shapes:
+        raise ValueError(f"{op}: out must have shape {shapes[0]} or {shapes[1]}")
+    dst = out.view(shapes[0])
+
+    # Every rank's input is complete before anyone reads it.
+    hdl.barrier()
+    for peer in range(world_size):
+        remote = _peer_view(hdl, peer, src)
+        if scatter_dim == 1:
+            dst[peer].copy_(remote[:, rank])
+        else:
+            dst[:, peer].copy_(remote[rank])
+    # No rank reuses its input before every peer has read it.
+    hdl.barrier()
+
+
 def reduce_scatter_offset(
     input: torch.Tensor,
     out: list[torch.Tensor],
@@ -2726,6 +2892,11 @@ def reduce_scatter_offset(
     each ``j``, the ``j``-th owned block must have the same size across all
     ranks (so that ``out[j]`` has a uniform shape); different ``j``'s may
     differ.
+
+    The NCCL backend runs this as one kernel on an NCCL device communicator.
+    Other backends read every peer's ``input`` directly between two
+    ``barrier()`` calls on its handle, on the current stream, so every peer
+    must be directly addressable.
 
     Args:
         input (Tensor): 2-D tensor allocated via symmetric memory (innermost
@@ -2763,9 +2934,7 @@ def reduce_scatter_offset(
             input, out, group, dim, offsets, dst_ranks, red_op
         )
     else:
-        raise NotImplementedError(
-            f"reduce_scatter_offset: unsupported backend: {backend}"
-        )
+        _lsa_reduce_scatter_offset(input, out, group, dim, offsets, dst_ranks, red_op)
 
 
 def is_symm_mem_tensor(tensor: torch.Tensor) -> bool:
@@ -2812,6 +2981,11 @@ def all_to_all_nd(
     ``out[:, j, :]``. ``out`` must be contiguous with shape ``[local_rows, G, cols]`` or
     ``[local_rows, G * cols]`` (flattened gather and inner dims).
 
+    The NCCL backend runs this as one kernel on an NCCL device communicator.
+    Other backends read every peer's ``input`` directly between two
+    ``barrier()`` calls on its handle, on the current stream, so every peer
+    must be directly addressable.
+
     Args:
         input (Tensor): For ``(scatter_dim=1, gather_dim=0)``, 2-D ``[rows, G*local_cols]`` or
             3-D ``[rows, G, local_cols]`` in symmetric memory (innermost dimension contiguous).
@@ -2829,7 +3003,7 @@ def all_to_all_nd(
             input, out, scatter_dim, gather_dim, group
         )
     else:
-        raise NotImplementedError(f"all_to_all_nd: unsupported backend: {backend}")
+        _lsa_all_to_all_nd(input, out, scatter_dim, gather_dim, group)
 
 
 __all__ = [

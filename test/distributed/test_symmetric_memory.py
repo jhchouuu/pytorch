@@ -1085,6 +1085,115 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
             symm_mem.wait_signal(hdl, -1)
 
     @skipIfXpu(
+        msg="XPU symm mem gaps are tracked in https://github.com/intel/torch-xpu-ops/issues/5404"
+    )
+    @skipIf(
+        not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
+    )
+    @skip_if_lt_x_gpu(2)
+    @parametrize("dim", [0, 1])
+    @parametrize("uneven", [False, True])
+    def test_reduce_scatter_offset(self, dim: int, uneven: bool) -> None:
+        self._init_process()
+        if symm_mem.get_backend(self.device) == "NCCL":
+            self.skipTest("covered by NCCLSymmetricMemoryTest")
+        group_name = dist.group.WORLD.group_name
+        world_size = self.world_size
+        other = 8  # size of the dimension that is not sharded
+
+        # Two blocks per rank, round-robin; the j-th owned blocks share a size.
+        block_sizes = [4] * world_size + [12 if uneven else 4] * world_size
+        offsets = list(itertools.accumulate(block_sizes))
+        starts = [0, *offsets[:-1]]
+        dst_ranks = [i % world_size for i in range(len(block_sizes))]
+        shape = (offsets[-1], other) if dim == 0 else (other, offsets[-1])
+        buf = symm_mem.empty(*shape, device=self.device)
+        for i, (start, size) in enumerate(zip(starts, block_sizes)):
+            buf.narrow(dim, start, size).fill_((self.rank + 1) * (i + 1))
+        symm_mem.rendezvous(buf, group=group_name)
+        expected_buf = buf.clone()
+
+        owned = [i for i, r in enumerate(dst_ranks) if r == self.rank]
+        out = [
+            torch.empty(
+                (block_sizes[i], other) if dim == 0 else (other, block_sizes[i]),
+                device=self.device,
+            )
+            for i in owned
+        ]
+        symm_mem.reduce_scatter_offset(
+            buf, out, group_name, dim=dim, offsets=offsets, dst_ranks=dst_ranks
+        )
+        rank_sum = sum(r + 1 for r in range(world_size))
+        for i, o in zip(owned, out):
+            self.assertEqual(o, torch.full_like(o, rank_sum * (i + 1)))
+        self.assertEqual(buf, expected_buf)
+
+        # Default offsets and dst_ranks: one equal block per rank.
+        shape = (4 * world_size, other) if dim == 0 else (other, 4 * world_size)
+        buf = symm_mem.empty(*shape, device=self.device).fill_(self.rank + 1)
+        symm_mem.rendezvous(buf, group=group_name)
+        out = [torch.empty((4, other) if dim == 0 else (other, 4), device=self.device)]
+        symm_mem.reduce_scatter_offset(buf, out, group_name, dim=dim)
+        self.assertEqual(out[0], torch.full_like(out[0], rank_sum))
+
+        with self.assertRaisesRegex(ValueError, r"len\(out\) must be 1"):
+            symm_mem.reduce_scatter_offset(buf, [], group_name, dim=dim)
+
+    @skipIfXpu(
+        msg="XPU symm mem gaps are tracked in https://github.com/intel/torch-xpu-ops/issues/5404"
+    )
+    @skipIf(
+        not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
+    )
+    @skip_if_lt_x_gpu(2)
+    @parametrize("scatter_dim", [0, 1])
+    @parametrize("input_3d", [False, True])
+    @parametrize("out_2d", [False, True])
+    def test_all_to_all_nd(
+        self, scatter_dim: int, input_3d: bool, out_2d: bool
+    ) -> None:
+        self._init_process()
+        if symm_mem.get_backend(self.device) == "NCCL":
+            self.skipTest("covered by NCCLSymmetricMemoryTest")
+        group_name = dist.group.WORLD.group_name
+        world_size = self.world_size
+        rows, cols = 3, 4
+
+        # Block k of each rank's input holds 100 * rank + k.
+        if scatter_dim == 1:
+            buf = symm_mem.empty(rows, world_size, cols, device=self.device)
+            for k in range(world_size):
+                buf[:, k].fill_(100 * self.rank + k)
+            if not input_3d:
+                buf = buf.view(rows, world_size * cols)
+            out_shape = (world_size, rows, cols)
+            if out_2d:
+                out_shape = (world_size * rows, cols)
+        else:
+            buf = symm_mem.empty(world_size, rows, cols, device=self.device)
+            for k in range(world_size):
+                buf[k].fill_(100 * self.rank + k)
+            if not input_3d:
+                buf = buf.view(world_size * rows, cols)
+            out_shape = (rows, world_size, cols)
+            if out_2d:
+                out_shape = (rows, world_size * cols)
+        symm_mem.rendezvous(buf, group=group_name)
+        out = torch.empty(out_shape, device=self.device)
+
+        symm_mem.all_to_all_nd(buf, out, scatter_dim, 1 - scatter_dim, group=group_name)
+        for peer in range(world_size):
+            if scatter_dim == 1:
+                received = out.view(world_size, rows, cols)[peer]
+            else:
+                received = out.view(rows, world_size, cols)[:, peer]
+            self.assertEqual(
+                received,
+                torch.full((rows, cols), 100.0 * peer + self.rank, device=self.device),
+            )
+
+    @skipIfXpu(
         msg="XPU symm mem aborts (SIGABRT) instead of raising: https://github.com/intel/torch-xpu-ops/issues/5404"
     )
     @skipIf(
