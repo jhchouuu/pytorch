@@ -145,6 +145,7 @@ paths = [
   'third_party/ideep/LICENSE',
   'third_party/mimalloc/LICENSE',
   'third_party/miniz-3.0.2/LICENSE',
+  'third_party/mori/LICENSE',
   'third_party/mslk/external/composable_kernel/LICENSE',
   'third_party/nlohmann/LICENSE.MIT',
   'third_party/psimd/LICENSE',

@@ -297,6 +297,11 @@ if(USE_NCCL AND NOT WIN32)
     list(APPEND TORCH_PYTHON_COMPILE_DEFINITIONS USE_NCCL)
 endif()
 
+if(USE_MORI)
+    # Registers the loader of the "MORI" symmetric memory backend.
+    list(APPEND TORCH_PYTHON_COMPILE_DEFINITIONS USE_MORI)
+endif()
+
 # coreml
 if(USE_COREML_DELEGATE)
   list(APPEND TORCH_PYTHON_SRCS ${TORCH_SRC_DIR}/csrc/jit/backends/coreml/cpp/backend.cpp)
@@ -522,6 +527,34 @@ if(BUILD_PYTHON AND NOT BUILD_LIBTORCH_WHL)
     if(SKBUILD)
       install(TARGETS _nccl_ep
         RUNTIME DESTINATION "${SKBUILD_PLATLIB_DIR}/torch"
+        LIBRARY DESTINATION "${SKBUILD_PLATLIB_DIR}/torch")
+    endif()
+  endif()
+
+  # ---[ MORI symmetric memory backend (torch._mori)
+  # Optional extension holding the "MORI" backend, imported on its first use by
+  # torch/distributed/_symmetric_memory/_mori.py, so `import torch` never loads
+  # MORI. It compiles against the C ABI header vendored in third_party/mori and
+  # does not link libmori_cco: the loader dlopens the copy in the amd-mori
+  # package, or reuses the one `import mori` loaded.
+  if(USE_MORI)
+    set(_mori_dir "${TORCH_SRC_DIR}/csrc/distributed/c10d/symm_mem/mori")
+    Python_add_library(_mori MODULE WITH_SOABI
+      "${_mori_dir}/MoriCco.cpp"
+      "${_mori_dir}/mori_pybind.cpp")
+    target_include_directories(_mori PRIVATE
+      "${PROJECT_SOURCE_DIR}/third_party/mori/include")
+    target_link_libraries(_mori PRIVATE
+      torch_python torch_hip pybind::pybind11 ${CMAKE_DL_LIBS})
+    set_target_properties(_mori PROPERTIES
+      HIP_ARCHITECTURES "${MORI_HIP_ARCHITECTURES}"
+      CXX_VISIBILITY_PRESET hidden
+      HIP_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/torch"
+      INSTALL_RPATH "${_rpath_portable_origin}/lib")
+    if(SKBUILD)
+      install(TARGETS _mori
         LIBRARY DESTINATION "${SKBUILD_PLATLIB_DIR}/torch")
     endif()
   endif()

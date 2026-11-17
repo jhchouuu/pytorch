@@ -128,6 +128,8 @@ ignores = [
     "aten/src/ATen/core/*",
     # Kineto has its own ROCm backend and must not be hipified.
     "torch/csrc/profiler/kineto/*",
+    # The MORI symmetric memory backend is ROCm-only and written in HIP.
+    "torch/csrc/distributed/c10d/symm_mem/mori/*",
     # Correct path to generate HIPConfig.h:
     #   CUDAConfig.h.in -> (amd_build) HIPConfig.h.in -> (cmake) HIPConfig.h
     "aten/src/ATen/cuda/CUDAConfig.h",

@@ -1243,6 +1243,31 @@ if(USE_NCCL_EP)
   endif()
 endif()
 
+# ---[ MORI
+# torch._mori (see torch/CMakeLists.txt) compiles against the C ABI header in
+# third_party/mori and loads libmori_cco from the amd-mori package at run time,
+# so there is nothing to find here. It builds for the archs MORI supports.
+if(USE_MORI)
+  if(NOT (USE_ROCM AND USE_DISTRIBUTED))
+    caffe2_update_option(USE_MORI OFF)
+  else()
+    set(MORI_SUPPORTED_ARCH gfx942 gfx950 gfx1250)
+    set(MORI_HIP_ARCHITECTURES)
+    foreach(_arch ${PYTORCH_ROCM_ARCH})
+      string(REGEX REPLACE ":.*" "" _arch_base "${_arch}")
+      if(_arch_base IN_LIST MORI_SUPPORTED_ARCH)
+        list(APPEND MORI_HIP_ARCHITECTURES "${_arch}")
+      endif()
+    endforeach()
+    if(MORI_HIP_ARCHITECTURES)
+      message(STATUS "USE_MORI is ON for ${MORI_HIP_ARCHITECTURES}")
+    else()
+      message(STATUS "PYTORCH_ROCM_ARCH has none of ${MORI_SUPPORTED_ARCH}; disabling USE_MORI")
+      caffe2_update_option(USE_MORI OFF)
+    endif()
+  endif()
+endif()
+
 # ---[ XCCL
 if(USE_XCCL)
   if(NOT USE_XPU)

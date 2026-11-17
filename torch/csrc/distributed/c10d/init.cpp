@@ -1747,6 +1747,16 @@ instead.)")
 #endif
   });
 
+#ifdef USE_MORI
+  // The "MORI" backend lives in the optional torch._mori extension, which is
+  // loaded the first time the backend is named.
+  ::c10d::symmetric_memory::register_backend_loader("MORI", [] {
+    py::gil_scoped_acquire gil;
+    py::module_::import("torch.distributed._symmetric_memory._mori")
+        .attr("_load_backend")();
+  });
+#endif
+
   using SymmetricMemory = ::c10d::symmetric_memory::SymmetricMemory;
   py::class_<SymmetricMemory, c10::intrusive_ptr<SymmetricMemory>>(
       module, "_SymmetricMemory")

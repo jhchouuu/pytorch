@@ -426,6 +426,7 @@ license-files = [
     "third_party/llvm-openmp/LICENSE.txt",
     "third_party/mimalloc/LICENSE",
     "third_party/miniz-3.0.2/LICENSE",
+    "third_party/mori/LICENSE",
     "third_party/mslk/LICENSE",
     "third_party/mslk/external/composable_kernel/LICENSE",
     "third_party/mslk/external/cutlass/LICENSE.txt",
