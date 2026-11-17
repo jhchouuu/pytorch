@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <set>
+#include <unordered_set>
 
 namespace {
 
@@ -140,14 +141,15 @@ class AllocatorMap {
  private:
   AllocatorMap() = default;
 
-  // Runs the loader of `name` if no backend of that name is registered yet.
-  // Runs without mutex_, since the loader registers the backend. A loader that
-  // throws or registers nothing runs again at the next lookup.
+  // Runs the loader of `name` until it returns without throwing, even if
+  // another library registered a backend under that name: the loader owns the
+  // name, and its registration replaces that one. Runs without mutex_, since
+  // the loader registers the backend.
   void maybe_load(const std::string& name) {
     std::function<void()> loader;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (avail_map_.contains(name)) {
+      if (loaded_.contains(name)) {
         return;
       }
       auto it = loaders_.find(name);
@@ -157,6 +159,8 @@ class AllocatorMap {
       loader = it->second;
     }
     loader();
+    std::lock_guard<std::mutex> lock(mutex_);
+    loaded_.insert(name);
   }
 
   // Loads the backend TORCH_SYMMMEM names, if `device_type` has none set yet.
@@ -257,6 +261,8 @@ class AllocatorMap {
 
   // Backends that register themselves when first named, by name.
   std::unordered_map<std::string, std::function<void()>> loaders_;
+  // Names whose loader has run successfully.
+  std::unordered_set<std::string> loaded_;
 
   bool in_use_ = false;
 };

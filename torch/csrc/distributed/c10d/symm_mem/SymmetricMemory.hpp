@@ -154,10 +154,11 @@ C10_EXPORT void register_availability(
     c10::intrusive_ptr<SymmetricMemoryAllocator> allocator);
 
 // Lets a backend that is not part of libtorch be named before it is loaded.
-// The first time set_backend() or TORCH_SYMMMEM names `name` while no backend
-// of that name is registered, `loader` runs and is expected to call
-// register_availability(name, ...). It runs without the registry lock held,
-// and again at the next lookup if it throws or registers nothing.
+// The first time set_backend() or TORCH_SYMMMEM names `name`, `loader` runs and
+// is expected to call register_availability(name, ...). The loader owns the
+// name: it runs even if another library registered a backend under it, and its
+// registration replaces that one. It runs without the registry lock held, and
+// again at the next lookup if it throws.
 C10_EXPORT void register_backend_loader(
     const std::string& name,
     std::function<void()> loader);
