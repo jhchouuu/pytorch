@@ -4500,6 +4500,27 @@ class SymmMemBackendEnvTest(TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @requires_cuda
+    def test_backend_loader_runs_before_mem_pool(self) -> None:
+        # The pool's first allocation holds the caching allocator's lock, so
+        # get_mem_pool() runs the TORCH_SYMMMEM loader before any allocation.
+        result = self._run_script(
+            """
+            import torch
+            import torch.distributed._symmetric_memory as symm_mem
+            from torch._C._distributed_c10d import _SymmetricMemory
+
+            calls = []
+            _SymmetricMemory._register_backend_loader(
+                "POOL_BACKEND", lambda: calls.append("pool")
+            )
+            symm_mem.get_mem_pool("cuda:0")
+            assert calls == ["pool"], calls
+            """,
+            "POOL_BACKEND",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 class SymmMemSingleProcTest(TestCase):
     @requires_accelerator

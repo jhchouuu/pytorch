@@ -517,6 +517,9 @@ C10_EXPORT void register_mempool_allocator(
 // Get allocator for MemPool given device
 TORCH_API std::shared_ptr<c10::Allocator> get_mempool_allocator(
     c10::Device device) {
+  // The pool's first allocation looks the backend up under the caching
+  // allocator's lock, so run a TORCH_SYMMMEM backend's loader here instead.
+  (void)AllocatorMap::get().get_backend(device.type());
   return MemPoolAllocatorMap::get().get_mempool_allocator(device);
 }
 
