@@ -2706,7 +2706,7 @@ def _peer_view(hdl: _SymmetricMemory, peer: int, t: torch.Tensor) -> torch.Tenso
 
 
 def _rendezvous_lsa(op: str, input: torch.Tensor, group: str) -> _SymmetricMemory:
-    hdl = rendezvous(input, group)
+    hdl = rendezvous(input, c10d.GroupName(group))
     if hdl is None:
         raise ValueError(f"{op}: input must be allocated via symmetric memory")
     for peer in range(hdl.world_size):
