@@ -1,8 +1,11 @@
 #include <torch/csrc/distributed/c10d/symm_mem/CUDASymmetricMemoryTypes.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
 
+#include <c10/util/StringUtil.h>
+#include <c10/util/env.h>
 #include <torch/custom_class.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 
@@ -24,6 +27,14 @@ static bool is_finalizing_ = false;
 // A value of 0 indicates "not set" (use default).
 // Using std::atomic for thread safety when accessed from C++ without GIL.
 static std::atomic<size_t> configured_signal_pad_size_{0};
+
+// The backend named by TORCH_SYMMMEM. It is matched against registered backends
+// at lookup time rather than at load time, so that a backend registered by
+// another library (e.g. on import) can be named too.
+static const std::optional<std::string>& requested_backend() {
+  static const auto val = c10::utils::get_env("TORCH_SYMMMEM");
+  return val;
+}
 
 // NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class AllocatorMap {
@@ -71,29 +82,38 @@ class AllocatorMap {
 
   std::optional<std::string> get_backend(c10::DeviceType device_type) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = map_.find(device_type);
-    if (it == map_.end()) {
+    auto allocator = find_allocator(device_type);
+    if (!allocator) {
       return std::nullopt;
     }
-    return it->second->name();
+    return allocator->name();
   }
 
   c10::intrusive_ptr<SymmetricMemoryAllocator> get_allocator(
       c10::DeviceType device_type) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = map_.find(device_type);
-    TORCH_CHECK(
-        it != map_.end(),
-        "SymmetricMemory does not support device type ",
-        device_type);
+    auto allocator = find_allocator(device_type);
+    if (!allocator) {
+      const auto& requested = requested_backend();
+      TORCH_CHECK(
+          !requested.has_value() || avail_map_.contains(*requested),
+          "TORCH_SYMMMEM is set to '",
+          requested.value_or(""),
+          "', but no SymmetricMemory backend with that name is registered "
+          "(registered: ",
+          registered_names(),
+          "). A backend provided by another library must be registered, "
+          "e.g. by importing that library, before its first use.");
+      TORCH_CHECK(
+          false, "SymmetricMemory does not support device type ", device_type);
+    }
     in_use_ = true;
-    return it->second;
+    return allocator;
   }
 
   bool has_allocator(c10::DeviceType device_type) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = map_.find(device_type);
-    return it != map_.end();
+    return find_allocator(device_type).defined();
   }
 
   ~AllocatorMap() {
@@ -102,6 +122,38 @@ class AllocatorMap {
 
  private:
   AllocatorMap() = default;
+
+  // Requires mutex_. If no backend is set for `device_type`, selects the one
+  // TORCH_SYMMMEM names once it is registered for that device type.
+  c10::intrusive_ptr<SymmetricMemoryAllocator> find_allocator(
+      c10::DeviceType device_type) {
+    auto it = map_.find(device_type);
+    if (it != map_.end()) {
+      return it->second;
+    }
+    const auto& requested = requested_backend();
+    if (!requested.has_value()) {
+      return {};
+    }
+    auto avail = avail_map_.find(*requested);
+    if (avail == avail_map_.end() ||
+        avail->second->supported_device_type() != device_type) {
+      return {};
+    }
+    map_[device_type] = avail->second;
+    return avail->second;
+  }
+
+  // Requires mutex_.
+  std::string registered_names() const {
+    std::vector<std::string> names;
+    names.reserve(avail_map_.size());
+    for (const auto& entry : avail_map_) {
+      names.push_back(entry.first);
+    }
+    std::sort(names.begin(), names.end());
+    return c10::Join(", ", names);
+  }
 
   std::mutex mutex_;
   std::unordered_map<
