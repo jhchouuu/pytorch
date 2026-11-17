@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <set>
 
 namespace {
 
@@ -96,7 +97,7 @@ class AllocatorMap {
     if (!allocator) {
       const auto& requested = requested_backend();
       TORCH_CHECK(
-          !requested.has_value() || avail_map_.contains(*requested),
+          !requested.has_value() || is_registered(*requested),
           "TORCH_SYMMMEM is set to '",
           requested.value_or(""),
           "', but no SymmetricMemory backend with that name is registered "
@@ -144,14 +145,24 @@ class AllocatorMap {
     return avail->second;
   }
 
+  // Requires mutex_. True if `name` is available or already set for a device
+  // type, as a backend TORCH_SYMMMEM selects at load time is.
+  bool is_registered(const std::string& name) const {
+    return avail_map_.contains(name) ||
+        std::any_of(map_.begin(), map_.end(), [&](const auto& entry) {
+             return entry.second->name() == name;
+           });
+  }
+
   // Requires mutex_.
   std::string registered_names() const {
-    std::vector<std::string> names;
-    names.reserve(avail_map_.size());
+    std::set<std::string> names;
     for (const auto& entry : avail_map_) {
-      names.push_back(entry.first);
+      names.insert(entry.first);
     }
-    std::sort(names.begin(), names.end());
+    for (const auto& entry : map_) {
+      names.insert(entry.second->name());
+    }
     return c10::Join(", ", names);
   }
 
