@@ -1747,9 +1747,10 @@ instead.)")
 #endif
   });
 
-#ifdef USE_MORI
+#ifdef USE_ROCM
   // The "MORI" backend lives in the optional torch._mori extension, which is
-  // loaded the first time the backend is named.
+  // loaded the first time the backend is named; on a build without it, the
+  // loader raises an ImportError saying so.
   ::c10d::symmetric_memory::register_backend_loader("MORI", [] {
     py::gil_scoped_acquire gil;
     py::module_::import("torch.distributed._symmetric_memory._mori")

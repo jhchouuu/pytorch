@@ -297,11 +297,6 @@ if(USE_NCCL AND NOT WIN32)
     list(APPEND TORCH_PYTHON_COMPILE_DEFINITIONS USE_NCCL)
 endif()
 
-if(USE_MORI)
-    # Registers the loader of the "MORI" symmetric memory backend.
-    list(APPEND TORCH_PYTHON_COMPILE_DEFINITIONS USE_MORI)
-endif()
-
 # coreml
 if(USE_COREML_DELEGATE)
   list(APPEND TORCH_PYTHON_SRCS ${TORCH_SRC_DIR}/csrc/jit/backends/coreml/cpp/backend.cpp)

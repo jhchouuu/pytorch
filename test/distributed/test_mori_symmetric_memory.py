@@ -108,19 +108,26 @@ class MoriLoaderTest(TestCase):
         )
 
     def test_without_extension(self) -> None:
+        # set_backend() and TORCH_SYMMMEM both name the missing build flag.
         if importlib.util.find_spec("torch._mori") is not None:
             self.skipTest("this PyTorch was built with USE_MORI=1")
         self._run(
             """
+            import torch
             import torch.distributed._symmetric_memory as symm_mem
 
-            try:
-                symm_mem.set_backend("MORI")
-            except RuntimeError as e:
-                assert "does not find allocation backend MORI" in str(e), e
-            else:
-                raise AssertionError("selected MORI without torch._mori")
-            """
+            for select in (
+                lambda: symm_mem.set_backend("MORI"),
+                lambda: symm_mem.empty(16, device="cuda"),
+            ):
+                try:
+                    select()
+                except ImportError as e:
+                    assert "USE_MORI=1" in str(e), e
+                else:
+                    raise AssertionError("selected MORI without torch._mori")
+            """,
+            TORCH_SYMMMEM="MORI",
         )
 
     @skipUnless(importlib.util.find_spec("torch._mori"), "needs USE_MORI=1")
