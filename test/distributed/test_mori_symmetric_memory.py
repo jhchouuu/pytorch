@@ -580,6 +580,18 @@ class MoriLifecycleTest(_MoriTestMixin, MultiProcessTestCase):
         c10d.destroy_process_group()
 
     @skip_if_lt_x_gpu(2)
+    def test_group_spanning_teams_rejected(self) -> None:
+        # Distinct vPOD ids put each rank in its own load/store team, as on
+        # two nodes; torch's ops would load from unmapped peers.
+        os.environ["MORI_VPOD_ID"] = str(self.rank)
+        self._init()
+        group_name = self._world()
+        t = symm_mem.empty(64, device=self.device)
+        with self.assertRaisesRegex(RuntimeError, "share a load/store team"):
+            symm_mem.rendezvous(t, group=group_name)
+        c10d.destroy_process_group()
+
+    @skip_if_lt_x_gpu(2)
     def test_handle_outlives_tensor(self) -> None:
         # Freeing a rendezvoused tensor while a handle to it is alive keeps
         # the handle's signal pad usable.

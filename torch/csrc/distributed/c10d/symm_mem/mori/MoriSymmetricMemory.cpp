@@ -306,6 +306,7 @@ struct CommGroup {
   int device = -1;
   int rank = -1;
   int world_size = 0;
+  int lsa_size = 0; // ranks in this rank's load/store team
   int mem_handle_type = 0;
   // Drawn by rank 0; a communicator is reused only if all ranks hold it.
   uint64_t epoch = 0;
@@ -710,6 +711,18 @@ class MoriSymmetricMemoryAllocator : public SymmetricMemoryAllocator {
       cached.reset();
     }
     auto group = reuse ? cached : create_group(name, dev, pg, infos);
+    // torch's ops load from every peer. lsaSize is the same on every rank, so
+    // all ranks fail here alike, before the collective window imports.
+    TORCH_CHECK(
+        group->lsa_size == world_size,
+        "MORI symmetric memory: group ",
+        name,
+        " has ",
+        world_size,
+        " ranks, but only ",
+        group->lsa_size,
+        " of them share a load/store team; the MORI backend needs every rank "
+        "of a group on one node or in one fabric domain");
     TORCH_CHECK(
         group->mem_handle_type == static_cast<int>(block.handle_type),
         "MORI symmetric memory: the communicator exports handle type ",
@@ -788,6 +801,7 @@ class MoriSymmetricMemoryAllocator : public SymmetricMemoryAllocator {
     info.size = sizeof(info);
     C10D_MORI_CHECK(api.commGetInfo(group->comm, &info));
     group->mem_handle_type = info.memHandleType;
+    group->lsa_size = info.lsaSize;
 
     bool have_global = true;
     for (const auto& i : infos) {
@@ -868,8 +882,7 @@ class MoriSymmetricMemoryAllocator : public SymmetricMemoryAllocator {
         &info));
     peer->pad_device_window = info.deviceWindow;
 
-    // Peers outside the LSA team stay null, which is how torch's backends
-    // report a peer without load/store access.
+    // Every peer is in the LSA team (checked at rendezvous).
     peer->buffers.resize(world_size);
     peer->pads.resize(world_size);
     for (const auto r : c10::irange(world_size)) {

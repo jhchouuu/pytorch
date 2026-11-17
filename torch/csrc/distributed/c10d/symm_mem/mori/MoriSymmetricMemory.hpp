@@ -10,8 +10,8 @@
 // The "MORI" SymmetricMemory backend. Allocations are HIP VMM memory owned by
 // this backend; MORI-CCO maps them into the peers of each group at rendezvous,
 // over its C ABI, and gives every (allocation, group) its own signal pad.
-// Peers outside the caller's load/store (LSA) team have no mapping and appear
-// as null pointers.
+// Every rank of a group must be in one load/store (LSA) team: one node, or one
+// fabric domain.
 namespace c10d::symmetric_memory::mori {
 
 struct PeerAlloc;

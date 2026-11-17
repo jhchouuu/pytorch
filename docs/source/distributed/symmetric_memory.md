@@ -84,7 +84,7 @@ with {func}`set_backend` before the first allocation, or with the
 | `CUDA` | CUDA, ROCm | The default. |
 | `NVSHMEM` | CUDA (NVSHMEM), ROCm (rocSHMEM) | Needs the SHMEM library; provides the `nvshmem_*` operators. |
 | `NCCL` | CUDA, ROCm (RCCL) | Registers allocations as NCCL windows. |
-| `MORI` | ROCm (gfx942, gfx950, gfx1250) | Peers on the same node. Built with `USE_MORI=1`; the runtime comes from the `amd-mori` package. See [MORI backend](mori-backend). |
+| `MORI` | ROCm (gfx942, gfx950, gfx1250) | Groups within one node. Built with `USE_MORI=1`; the runtime comes from the `amd-mori` package. See [MORI backend](mori-backend). |
 
 (mori-backend)=
 ### MORI backend
@@ -106,12 +106,14 @@ hdl = symm_mem.rendezvous(t, group=dist.group.WORLD)
 ```
 
 - Allocations are HIP virtual-memory allocations. The first `rendezvous` of a
-  tensor with a group maps it into every peer on the same node, and gives that
-  (tensor, group) pair its own signal pad. Peers on other nodes have no
-  mapping: their entries in `buffer_ptrs` and `signal_pad_ptrs` are 0.
+  tensor with a group maps it into every peer, and gives that (tensor, group)
+  pair its own signal pad. Every rank of the group must reach the others'
+  memory by load and store, which means one node or one fabric domain; a
+  `rendezvous` with any other group raises an error.
 - `barrier`, `put_signal`, and `wait_signal` follow the CUDA backend's
   signal-pad protocol on the current stream, with channels and timeouts.
-  Built-in collectives such as `one_shot_all_reduce` work unchanged.
+  Built-in collectives such as `one_shot_all_reduce` work unchanged on those
+  groups.
 - `empty` and the first `rendezvous` of a tensor with a group cannot be
   captured in a graph; later `rendezvous` calls and the collectives can.
 - MemPool is supported.
