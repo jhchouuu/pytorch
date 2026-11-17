@@ -2351,12 +2351,8 @@ class NCCLOneSidedOpHandleTypeTest(MultiProcessTestCase):
     )
     @requires_nccl_version((2, 29), "NCCL one-sided host API support from nccl 2.29")
     def test_one_sided_ops_reject_foreign_handle(self) -> None:
-        # The default backend is registered directly rather than by name, so
-        # it cannot be selected through set_backend; take it as it comes and
-        # skip if this build happens to default to NCCL.
-        if symm_mem.get_backend(self.device) == "NCCL":
-            raise SkipTest("Test needs a non-NCCL symmetric memory backend")
         torch.cuda.set_device(self.device)
+        symm_mem.set_backend("CUDA")
         c10d.init_process_group(
             backend="nccl",
             world_size=self.world_size,
