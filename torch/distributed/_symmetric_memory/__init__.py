@@ -2531,12 +2531,46 @@ def get_mem_pool(device: _device) -> torch.cuda.MemPool | torch.xpu.MemPool:
     return _symm_mem_pools[device]
 
 
-def _cuda_get_out(
+# Backends without a dedicated op implement the one-sided APIs below through
+# the handle: loads and stores go through the peer's mapping of the allocation,
+# and signals use the handle's put_signal/wait_signal on channel 0. This needs
+# the peer to be reachable by load/store.
+
+
+def _check_peer_access(op: str, hdl: _SymmetricMemory, peer: int) -> None:
+    if hdl.buffer_ptrs[peer] == 0:
+        raise ValueError(
+            f"{op}: peer {peer} is not reachable by load/store with the "
+            f"{get_backend(hdl.device)} backend"
+        )
+
+
+def _lsa_get_out(
     dst: torch.Tensor, hdl: _SymmetricMemory, offset: int, size: int, peer: int
 ) -> None:
     storage_offset = hdl.offset // dst.element_size() + offset
     remote_src = hdl.get_buffer(peer, (size,), dst.dtype, storage_offset)
     dst.view(-1)[:size].copy_(remote_src)
+
+
+def _lsa_put_signal(src: torch.Tensor, hdl: _SymmetricMemory, peer: int) -> None:
+    if src.device != hdl.device:
+        raise ValueError("put_signal: src must be on the same device as hdl")
+    if not src.is_contiguous():
+        raise ValueError("put_signal: src must be backed by contiguous memory")
+    if peer < 0 or peer >= hdl.world_size:
+        raise ValueError("put_signal: invalid peer")
+    if hdl.offset + src.numel() * src.element_size() > hdl.buffer_size:
+        raise ValueError("put_signal: src exceeds symmetric allocation")
+    _check_peer_access("put_signal", hdl, peer)
+    hdl.get_remote_tensor(peer, src.shape, src.dtype).copy_(src)
+    hdl.put_signal(peer)
+
+
+def _lsa_wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
+    if peer < 0 or peer >= hdl.world_size:
+        raise ValueError("wait_signal: invalid peer")
+    hdl.wait_signal(peer)
 
 
 # One-sided communication APIs.
@@ -2588,8 +2622,9 @@ def get(
         raise ValueError("get: requested range exceeds symmetric allocation")
 
     backend = get_backend(dst.device)
-    if backend == "CUDA":
-        _cuda_get_out(dst, hdl, offset, size, peer)
+    if backend not in ("NVSHMEM", "NCCL"):
+        _check_peer_access("get", hdl, peer)
+        _lsa_get_out(dst, hdl, offset, size, peer)
         return
 
     # `hdl` is a pybind `_SymmetricMemory` object. Dispatcher expects the
@@ -2598,10 +2633,8 @@ def get(
     hdl_boxed = hdl.boxed() if hasattr(hdl, "boxed") else hdl
     if backend == "NVSHMEM":
         torch.ops.symm_mem.nvshmem_get_out(dst, hdl_boxed, offset, size, peer)
-    elif backend == "NCCL":
-        torch.ops.symm_mem.nccl_get_out(dst, hdl_boxed, offset, size, peer)
     else:
-        raise ValueError(f"get: unsupported backend: {backend}")
+        torch.ops.symm_mem.nccl_get_out(dst, hdl_boxed, offset, size, peer)
 
 
 def put_signal(src: torch.Tensor, hdl: _SymmetricMemory, peer: int) -> None:
@@ -2610,21 +2643,31 @@ def put_signal(src: torch.Tensor, hdl: _SymmetricMemory, peer: int) -> None:
 
     Put data to a peer's symmetric memory and signal the peer.
 
+    Copies ``src`` into ``peer``'s allocation backing ``hdl``, starting where
+    ``hdl``'s tensor starts, then signals ``peer``. The peer receives the
+    signal with :func:`wait_signal`, after which the data is visible to it.
+    The operation is issued on the current stream. ``src`` must be contiguous
+    and on the same device as ``hdl``.
+
+    The NCCL backend uses NCCL's one-sided API. Other backends store through
+    the peer's mapping of the allocation and then call ``hdl.put_signal(peer)``,
+    which requires ``peer`` to be reachable by load/store and shares channel 0
+    of ``hdl``'s signal pad.
+
     Args:
         src (torch.Tensor): the source tensor to read data from.
         hdl (SymmetricMemory): the symmetric memory to put data to.
         peer (int): the peer to put data to.
     """
     backend = get_backend(src.device)
-    # `hdl` is a pybind `_SymmetricMemory` object. Dispatcher expects the
-    # TorchBind custom class type `__torch__.torch.classes.c10d.SymmetricMemory`.
-    # Convert via `.boxed()`.
-    hdl_boxed = hdl.boxed() if hasattr(hdl, "boxed") else hdl
     if backend == "NCCL":
+        # `hdl` is a pybind `_SymmetricMemory` object. Dispatcher expects the
+        # TorchBind custom class type
+        # `__torch__.torch.classes.c10d.SymmetricMemory`. Convert via `.boxed()`.
+        hdl_boxed = hdl.boxed() if hasattr(hdl, "boxed") else hdl
         torch.ops.symm_mem.nccl_put_signal(src, hdl_boxed, peer)
-    # TODO: other backends' dispatch goes here
     else:
-        raise ValueError(f"put_signal: unsupported backend: {backend}")
+        _lsa_put_signal(src, hdl, peer)
 
 
 def wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
@@ -2633,18 +2676,21 @@ def wait_signal(hdl: _SymmetricMemory, peer: int) -> None:
 
     Wait for a signal from a peer.
 
+    Waits, on the current stream, for one signal that ``peer`` sent with
+    :func:`put_signal` on ``hdl``. Backends other than NCCL wait with
+    ``hdl.wait_signal(peer)``.
+
     Args:
         hdl (SymmetricMemory): the symmetric memory handle on which to wait for a signal.
         peer (int): the peer to wait for a signal from.
     """
     backend = get_backend(hdl.device)
-    # See note in `put_signal` about `_SymmetricMemory` vs TorchBind type.
-    hdl_boxed = hdl.boxed() if hasattr(hdl, "boxed") else hdl
     if backend == "NCCL":
+        # See note in `put_signal` about `_SymmetricMemory` vs TorchBind type.
+        hdl_boxed = hdl.boxed() if hasattr(hdl, "boxed") else hdl
         torch.ops.symm_mem.nccl_wait_signal(hdl_boxed, peer)
-    # TODO: other backends' dispatch goes here
     else:
-        raise ValueError(f"wait_signal: unsupported backend: {backend}")
+        _lsa_wait_signal(hdl, peer)
 
 
 def reduce_scatter_offset(
