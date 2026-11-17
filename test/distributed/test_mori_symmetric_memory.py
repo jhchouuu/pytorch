@@ -599,6 +599,19 @@ class MoriLifecycleTest(_MoriTestMixin, MultiProcessTestCase):
         c10d.destroy_process_group()
 
     @skip_if_lt_x_gpu(2)
+    def test_rail_flags_differ(self) -> None:
+        # MORI's RDMA settings, e.g. from an EP launch script on one node only,
+        # do not concern the backend's communicators, which have no RDMA.
+        if self.rank == 0:
+            os.environ["MORI_ENABLE_RAIL_ONLY"] = "1"
+        self._init()
+        group_name = self._world()
+        t = symm_mem.empty(64, device=self.device)
+        symm_mem.rendezvous(t, group=group_name).barrier()
+        torch.cuda.synchronize()
+        c10d.destroy_process_group()
+
+    @skip_if_lt_x_gpu(2)
     def test_handle_outlives_tensor(self) -> None:
         # Freeing a rendezvoused tensor while a handle to it is alive keeps
         # the handle's signal pad usable.
