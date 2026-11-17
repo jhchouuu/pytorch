@@ -190,7 +190,7 @@ class MoriLoaderTest(TestCase):
     @requires_mori
     def test_loads_package_copy(self) -> None:
         # Without `import mori`, the loader maps libmori_cco.so.1 from the
-        # amd-mori package (not its libmori_cco.so copy), and `import mori`
+        # amd-mori package (not its libmori_cco.so), and `import mori`
         # afterwards shares it.
         self._run(
             """

@@ -366,8 +366,7 @@ struct CommGroup {
 
 // An allocation's memory, shared by its block and the rendezvous handles, so
 // a handle keeps it mapped after its tensor is freed. The windows importing
-// it are released after its own mapping: on ROCm 7.14 the fd a window closes
-// must outlive every hipMemRelease of the allocation.
+// it hold their own reference to it.
 struct BlockMemory {
   VmmMemory memory;
   std::mutex mutex; // guards windows

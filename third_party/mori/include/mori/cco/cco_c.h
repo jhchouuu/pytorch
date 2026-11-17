@@ -55,10 +55,9 @@
 // any that remain. Nothing may be released while GPU work that uses it is in
 // flight. A dev comm's window table is fixed when it is created, so release dev
 // comms that might look a window up before releasing that window. A window holds
-// its own reference to the memory it imports, so the owner may unmap and release
-// its VMM handle first. On ROCm 7.14 it should: the fd the window closes must
-// outlive every hipMemRelease of the allocation, or its pages are not returned.
-// A forked child must not use handles created by its parent.
+// its own reference to the memory it imports, so the owner's unmap and release of
+// its VMM handle and windowRelease may come in either order. A forked child must
+// not use handles created by its parent.
 #ifndef MORI_CCO_CCO_C_H_
 #define MORI_CCO_CCO_C_H_
 
@@ -97,11 +96,13 @@ typedef struct moriCcoUniqueId {
 } moriCcoUniqueId_t;
 
 // commCreate flags. They must match on all ranks.
-// Leave the calling thread's CPU affinity alone. By default commCreate pins it to
-// its GPU's NUMA-local cores, and threads it starts later inherit that.
+// Leave the calling thread's CPU affinity alone. Without it commCreate pins the
+// thread to its GPU's NUMA-local cores, and threads it starts later inherit that.
 #define MORI_CCO_COMM_NO_CPU_AFFINITY ((uint64_t)1 << 0)
 // Intra-node (LSA) only: open no RDMA device and skip GPU-NIC topology. Peers
 // outside the caller's LSA team are unreachable (windowPeerPtr gives NULL).
+// Required: ABI 1.0 has no RDMA, so commCreate refuses a config without it with
+// MORI_CCO_ERROR_NOT_SUPPORTED.
 #define MORI_CCO_COMM_LSA_ONLY ((uint64_t)1 << 1)
 
 // Reserved for a caller-provided bootstrap (e.g. a c10d Store); a later minor
@@ -117,7 +118,10 @@ typedef struct moriCcoCommConfig {
   int reserved;  // must be 0
 } moriCcoCommConfig_t;
 
-#define MORI_CCO_COMM_CONFIG_INIT {sizeof(moriCcoCommConfig_t), 0, 0, NULL, -1, 0}
+// What MORI_CCO_COMM_CONFIG_INIT and a NULL config use.
+#define MORI_CCO_COMM_DEFAULT_FLAGS (MORI_CCO_COMM_LSA_ONLY | MORI_CCO_COMM_NO_CPU_AFFINITY)
+#define MORI_CCO_COMM_CONFIG_INIT \
+  {sizeof(moriCcoCommConfig_t), MORI_CCO_COMM_DEFAULT_FLAGS, 0, NULL, -1, 0}
 
 typedef struct moriCcoCommInfo {
   size_t size;  // in: sizeof(moriCcoCommInfo_t)
@@ -172,7 +176,7 @@ typedef struct moriCcoApi {
   // Call on rank 0 only. Uses MORI_SOCKET_IFNAME, else the first non-loopback NIC.
   int (*getUniqueId)(moriCcoUniqueId_t* uniqueId);
 
-  // Collective. config may be NULL for defaults.
+  // Collective. A NULL config means MORI_CCO_COMM_CONFIG_INIT.
   int (*commCreate)(const moriCcoUniqueId_t* uniqueId, int nRanks, int rank,
                     const moriCcoCommConfig_t* config, moriCcoComm_t* comm);
   // Local. Also releases the comm's remaining windows and dev comms.

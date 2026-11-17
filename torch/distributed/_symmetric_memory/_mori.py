@@ -65,7 +65,7 @@ def _unavailable_reason() -> str | None:
 
 def _load_library(ext: ModuleType) -> None:
     # Reuse the copy `import mori` loaded, so the process holds only one. The
-    # package also ships libmori_cco.so, a separate copy meant for linkers.
+    # package's libmori_cco.so is for linkers and is never loaded.
     try:
         loaded = ext.load("")
     except RuntimeError as e:
