@@ -95,6 +95,9 @@ loads it only when it is selected: `import torch` does not load MORI. At first
 use, PyTorch reuses the MORI runtime that `import mori` loaded, or loads the
 `libmori_cco.so.1` installed by the `amd-mori` package (`pip install
 amd-mori`). Without that package, selecting the backend raises an `ImportError`.
+A build with `USE_MORI=1` owns the name `MORI`: selecting it replaces a backend
+that `amd-mori` registered under that name (`mori.allocator`, for builds
+without it).
 
 ```python
 import torch.distributed as dist
