@@ -2785,18 +2785,27 @@ def _lsa_reduce_scatter_offset(
         if o.dtype != input.dtype:
             raise RuntimeError(f"{op}: out[{j}] must have the same dtype as input")
 
+    # Host work that can fail goes before the first barrier: a rank that raised
+    # between the barriers would leave its peers waiting in the second one.
     peers = [_peer_view(hdl, peer, input) for peer in range(world_size)]
-    acc_dtype = (
-        torch.float32 if input.dtype in (torch.float16, torch.bfloat16) else input.dtype
-    )
+    blocks = [
+        [p.narrow(dim, starts[i], offsets[i] - starts[i]) for p in peers] for i in owned
+    ]
+    # fp16/bf16 blocks sum in fp32 scratch; other dtypes sum straight into out.
+    totals = out
+    if input.dtype in (torch.float16, torch.bfloat16):
+        acc = torch.empty(
+            max(o.numel() for o in out), dtype=torch.float32, device=input.device
+        )
+        totals = [acc[: o.numel()].view(o.shape) for o in out]
     # Every rank's input is complete before anyone reads it.
     hdl.barrier()
-    for i, o in zip(owned, out):
-        blocks = [p.narrow(dim, starts[i], offsets[i] - starts[i]) for p in peers]
-        acc = blocks[0].to(acc_dtype, copy=True)
-        for block in blocks[1:]:
-            acc.add_(block)
-        o.copy_(acc)
+    for o, total, peer_blocks in zip(out, totals, blocks):
+        total.copy_(peer_blocks[0])
+        for block in peer_blocks[1:]:
+            total.add_(block)
+        if total is not o:
+            o.copy_(total)
     # No rank reuses its input before every peer has read it.
     hdl.barrier()
 
@@ -2846,14 +2855,18 @@ def _lsa_all_to_all_nd(
         raise RuntimeError(f"{op}: out must have shape {shapes[0]} or {shapes[1]}")
     dst = out.view(shapes[0])
 
-    # Every rank's input is complete before anyone reads it.
-    hdl.barrier()
+    # Views are built before the first barrier, as in reduce_scatter_offset.
+    copies = []
     for peer in range(world_size):
         remote = _peer_view(hdl, peer, src)
         if scatter_dim == 1:
-            dst[peer].copy_(remote[:, rank])
+            copies.append((dst[peer], remote[:, rank]))
         else:
-            dst[:, peer].copy_(remote[rank])
+            copies.append((dst[:, peer], remote[rank]))
+    # Every rank's input is complete before anyone reads it.
+    hdl.barrier()
+    for d, r in copies:
+        d.copy_(r)
     # No rank reuses its input before every peer has read it.
     hdl.barrier()
 

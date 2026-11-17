@@ -91,6 +91,7 @@ from torch.testing._internal.common_utils import (
     xfailIf,
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
+from torch.utils._python_dispatch import TorchDispatchMode
 
 
 test_contexts = [nullcontext, _test_mode]
@@ -1216,6 +1217,78 @@ class SymmetricMemoryTest(MultiProcContinuousTest):
 
         with self.assertRaisesRegex(RuntimeError, "unsupported"):
             symm_mem.all_to_all_nd(buf, out, scatter_dim, scatter_dim, group=group_name)
+
+    @skipIfXpu(
+        msg="XPU symm mem gaps are tracked in https://github.com/intel/torch-xpu-ops/issues/5404"
+    )
+    @skipIf(
+        not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
+    )
+    @skip_if_lt_x_gpu(2)
+    @parametrize("dtype", [torch.float, torch.bfloat16])
+    def test_generic_routed_ops_only_copy_between_barriers(
+        self, dtype: torch.dtype
+    ) -> None:
+        # A rank that raised between the two barriers would leave its peers
+        # waiting in the second one, so only copies may run there.
+        self._init_process()
+        if symm_mem.get_backend(self.device) == "NCCL":
+            self.skipTest("NCCL runs each op as one kernel")
+        group_name = dist.group.WORLD.group_name
+        world_size = self.world_size
+        events: list[str] = []
+
+        class RecordOps(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                events.append(func.overloadpacket.__name__)
+                return func(*args, **(kwargs or {}))
+
+        class RecordHandle:
+            def __init__(self, hdl) -> None:
+                self._hdl = hdl
+
+            def __getattr__(self, name):
+                return getattr(self._hdl, name)
+
+            def barrier(self, *args, **kwargs):
+                events.append("barrier")
+                return self._hdl.barrier(*args, **kwargs)
+
+            def get_buffer(self, *args, **kwargs):
+                events.append("get_buffer")
+                return self._hdl.get_buffer(*args, **kwargs)
+
+        rendezvous = symm_mem.rendezvous
+
+        def run(op, buf, *args, **kwargs):
+            rendezvous(buf, group=group_name)
+            events.clear()
+            with (
+                mock.patch.object(
+                    symm_mem,
+                    "rendezvous",
+                    lambda t, group: RecordHandle(rendezvous(t, group)),
+                ),
+                RecordOps(),
+            ):
+                op(buf, *args, **kwargs)
+            barriers = [i for i, e in enumerate(events) if e == "barrier"]
+            self.assertEqual(len(barriers), 2)
+            self.assertLessEqual(
+                set(events[barriers[0] + 1 : barriers[1]]), {"copy_", "add_"}
+            )
+
+        buf = symm_mem.empty(4 * world_size, 8, dtype=dtype, device=self.device)
+        buf.fill_(self.rank + 1)
+        out = [torch.empty(4, 8, dtype=dtype, device=self.device)]
+        run(symm_mem.reduce_scatter_offset, buf, out, group_name, dim=0)
+        self.assertEqual(out[0], torch.full_like(out[0], sum(range(1, world_size + 1))))
+
+        buf = symm_mem.empty(world_size, 3, 4, dtype=dtype, device=self.device)
+        buf.copy_(torch.arange(world_size, device=self.device).view(-1, 1, 1))
+        out = torch.empty(3, world_size, 4, dtype=dtype, device=self.device)
+        run(symm_mem.all_to_all_nd, buf, out, 0, 1, group=group_name)
+        self.assertEqual(out, torch.full_like(out, self.rank))
 
     @skipIfXpu(
         msg="XPU symm mem aborts (SIGABRT) instead of raising: https://github.com/intel/torch-xpu-ops/issues/5404"
