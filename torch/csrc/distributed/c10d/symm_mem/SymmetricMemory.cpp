@@ -39,6 +39,9 @@ class AllocatorMap {
       c10::DeviceType device_type,
       c10::intrusive_ptr<SymmetricMemoryAllocator> allocator) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // An allocator registered for a device type is also selectable by name,
+    // so `set_backend(get_backend(device))` works for the default backend.
+    avail_map_[allocator->name()] = allocator;
     map_[device_type] = std::move(allocator);
   }
 
