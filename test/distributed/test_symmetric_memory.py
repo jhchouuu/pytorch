@@ -74,6 +74,8 @@ from torch.testing._internal.common_utils import (
     get_cycles_per_ms,
     getRocmVersion,
     instantiate_parametrized_tests,
+    IS_FBCODE,
+    IS_SANDCASTLE,
     isRocmArchAnyOf,
     lazy_skip_if,
     MI300_ARCH,
@@ -4009,14 +4011,14 @@ instantiate_device_type_tests(SymmMemCleanupTest, globals(), only_for="cuda")
 class SymmMemBackendEnvTest(TestCase):
     # TORCH_SYMMMEM is read when libtorch loads, so each case runs in a fresh
     # interpreter.
-    def _run_script(self, script: str, symmmem: str):
+    def _run_script(self, script: str, symmmem: str, timeout: int = 120):
         env = {**os.environ, "TORCH_SYMMMEM": symmmem}
         return subprocess.run(
             [sys.executable, "-c", textwrap.dedent(script)],
             env=env,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
 
     @requires_cuda
@@ -4076,6 +4078,83 @@ class SymmMemBackendEnvTest(TestCase):
                 raise AssertionError("allocated on cpu")
             """,
             "CUDA",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @requires_cuda
+    @skipIf(IS_FBCODE or IS_SANDCASTLE, "load_inline doesn't work in fbcode")
+    def test_backend_registered_after_import(self) -> None:
+        # TORCH_SYMMMEM may name a backend that a library registers after
+        # `import torch`; the first lookup after that selects it.
+        backend_src = textwrap.dedent(
+            """
+            #include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
+
+            namespace {
+            using namespace c10d::symmetric_memory;
+
+            class LateAllocator : public SymmetricMemoryAllocator {
+             public:
+              void* alloc(size_t, int, const std::optional<std::string>&) override {
+                TORCH_CHECK(false, "TEST_LATE does not allocate");
+              }
+              void free(void*) override {}
+              size_t get_alloc_size(void*) override {
+                return 0;
+              }
+              c10::intrusive_ptr<SymmetricMemory> rendezvous(
+                  void*,
+                  const std::optional<std::string>&) override {
+                TORCH_CHECK(false, "TEST_LATE does not rendezvous");
+              }
+              bool has_multicast_support(int) override {
+                return false;
+              }
+              c10::DeviceType supported_device_type() override {
+                return c10::DeviceType::CUDA;
+              }
+              std::string name() override {
+                return "TEST_LATE";
+              }
+            };
+
+            // Registers the backend when the library is loaded.
+            struct RegisterLateAllocator {
+              RegisterLateAllocator() {
+                register_availability(
+                    "TEST_LATE", c10::make_intrusive<LateAllocator>());
+              }
+            } register_late_allocator;
+            } // namespace
+            """
+        )
+        result = self._run_script(
+            f"""
+            import tempfile
+
+            import torch
+            import torch.distributed._symmetric_memory as symm_mem
+            from torch.utils.cpp_extension import load_inline
+
+            assert symm_mem.get_backend("cuda") is None
+            with tempfile.TemporaryDirectory() as build_dir:
+                load_inline(
+                    name="symm_mem_late_backend",
+                    cpp_sources={backend_src!r},
+                    build_directory=build_dir,
+                    is_python_module=False,
+                    no_implicit_headers=True,
+                )
+            assert symm_mem.get_backend("cuda") == "TEST_LATE"
+
+            # Nothing is allocated yet, so another backend can still be set.
+            symm_mem.set_backend("CUDA")
+            t = symm_mem.empty(16, device="cuda:0")
+            assert symm_mem.is_symm_mem_tensor(t)
+            assert symm_mem.get_backend("cuda") == "CUDA"
+            """,
+            "TEST_LATE",
+            timeout=600,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
